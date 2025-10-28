@@ -1,8 +1,9 @@
 import os
 import operator
-from typing import TypedDict, Annotated, List, Optional
+from typing import TypedDict, Annotated, List, Optional, Union
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage
+from langchain_core.prompts.chat import BaseChatPromptTemplate, BaseStringMessagePromptTemplate
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.postgres import PostgresSaver
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -14,6 +15,14 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
+import uuid
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+from datetime import datetime
 
 load_dotenv('api_secret.env')
 api_key = os.environ.get('API_KEY')
@@ -34,8 +43,10 @@ structured_llm = llm.with_structured_output(LoanDetails)
 #tools are here 
 CRM_API_URL = "http://localhost:8000/crm/verify"
 LOAN_API_URL = "http://localhost:8000/loans/options"
-LOG_API_URL = "http://localhost:8000/applications/log"
+LOG_API_URL = "http://localhost:8000/applications2/log"
+FETCH_APPLICATION_URL = "http://localhost:8000/applications2"
 UPLOAD_DIRECTORY = "./uploads/"
+
 
 
 @tool
@@ -89,12 +100,13 @@ def get_loan_options_tool(credit_score: int):
         return {"status": "Error", "": "Connection to CRM server failed."}
     
 @tool
-def log_application_tool(customer_id: int, plan_name: str, amount: int, interest_rate: float, tenure_years: int) -> dict:
+def log_application_tool(customer_id: int, plan_name: str, amount: int, interest_rate: float, tenure_years: int , application_id: str) -> dict:
     """
     Logs a finalized loan application to the bank's database via the API.
     """
     print("---TOOL: Logging application to database---")
     payload = {
+        "application_id": application_id,
         "customer_id": customer_id,
         "plan_name": plan_name,
         "amount": amount,
@@ -113,45 +125,227 @@ def log_application_tool(customer_id: int, plan_name: str, amount: int, interest
 # --- 2. Tool to generate the sanction letter PDF ---
 PDF_DIRECTORY = "./sanction_letters"
 
+
 @tool
-def generate_sanction_letter_tool(application_id: int, customer_name: str, amount: int, interest_rate: float, tenure_years: int) -> str:
+def generate_sanction_letter_tool(
+    application_id: int, 
+    customer_name: str, 
+    amount: int, 
+    interest_rate: float, 
+    tenure_years: int,
+    amortization_data: dict
+) -> str:
     """
-    Generates a simple PDF sanction letter and saves it to a local folder.
+    Generates a professional PDF sanction letter with a complete amortization schedule table.
     Returns the file path of the generated PDF.
     """
-    print("---TOOL: Generating sanction letter PDF---")
+    print("---TOOL: Generating enhanced sanction letter PDF with amortization table---")
     
-    # Ensure the directory exists
+    # Ensure directory exists
     if not os.path.exists(PDF_DIRECTORY):
         os.makedirs(PDF_DIRECTORY)
         
     file_path = os.path.join(PDF_DIRECTORY, f"sanction_letter_{application_id}.pdf")
     
     try:
-        c = canvas.Canvas(file_path, pagesize=letter)
-        width, height = letter # Get page dimensions
+        # Create the PDF document
+        doc = SimpleDocTemplate(
+            file_path,
+            pagesize=A4,
+            rightMargin=50,
+            leftMargin=50,
+            topMargin=50,
+            bottomMargin=50
+        )
         
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(72, height - 72, "TATA CAPITAL - LOAN SANCTION LETTER")
+        # Container for PDF elements
+        elements = []
         
-        c.setFont("Helvetica", 12)
-        c.drawString(72, height - 120, f"Application ID: {application_id}")
-        c.drawString(72, height - 140, f"Customer Name: {customer_name}")
+        # Get styles
+        styles = getSampleStyleSheet()
         
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(72, height - 180, "Loan Details Approved:")
+        # Custom styles
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            textColor=colors.HexColor('#1a472a'),
+            spaceAfter=30,
+            alignment=TA_CENTER,
+            fontName='Helvetica-Bold'
+        )
         
-        c.setFont("Helvetica", 12)
-        c.drawString(90, height - 200, f"Principal Amount: {amount:,.2f}")
-        c.drawString(90, height - 220, f"Interest Rate (APR): {interest_rate:.1f}%")
-        c.drawString(90, height - 240, f"Loan Tenure: {tenure_years} years")
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            textColor=colors.HexColor('#2c5f3d'),
+            spaceAfter=12,
+            spaceBefore=12,
+            fontName='Helvetica-Bold'
+        )
         
-        c.save()
-        print(f"PDF saved to: {file_path}")
+        normal_style = styles['Normal']
+        normal_style.fontSize = 11
+        normal_style.spaceAfter = 10
+        
+        # Title
+        title = Paragraph("<b>TATA CAPITAL</b><br/>LOAN SANCTION LETTER", title_style)
+        elements.append(title)
+        elements.append(Spacer(1, 20))
+        
+        # Application Details
+        app_details_data = [
+            ['Application ID:', str(application_id), 'Date:', datetime.now().strftime('%d-%b-%Y')],
+            ['Customer Name:', customer_name, 'Loan Type:', 'Personal Loan']
+        ]
+        
+        app_table = Table(app_details_data, colWidths=[100, 150, 80, 120])
+        app_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor('#2c5f3d')),
+            ('TEXTCOLOR', (2, 0), (2, -1), colors.HexColor('#2c5f3d')),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        elements.append(app_table)
+        elements.append(Spacer(1, 20))
+        
+        # Congratulations message
+        congrats = Paragraph(
+            f"Dear <b>{customer_name}</b>,<br/><br/>"
+            "We are pleased to inform you that your loan application has been <b>APPROVED</b>. "
+            "Below are the details of your sanctioned loan:",
+            normal_style
+        )
+        elements.append(congrats)
+        elements.append(Spacer(1, 15))
+        
+        # Loan Summary Table
+        summary_heading = Paragraph("<b>LOAN SUMMARY</b>", heading_style)
+        elements.append(summary_heading)
+        
+        monthly_payment = amortization_data['monthly_payment']
+        total_payment = amortization_data['total_payment']
+        total_interest = amortization_data['total_interest']
+        
+        loan_summary_data = [
+            ['Principal Amount', f'₹{amount:,.2f}'],
+            ['Interest Rate (p.a.)', f'{interest_rate}%'],
+            ['Loan Tenure', f'{tenure_years} years ({tenure_years * 12} months)'],
+            ['Monthly EMI', f'₹{monthly_payment:,.2f}'],
+            ['Total Amount Payable', f'₹{total_payment:,.2f}'],
+            ['Total Interest Payable', f'₹{total_interest:,.2f}']
+        ]
+        
+        summary_table = Table(loan_summary_data, colWidths=[250, 200])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#e8f5e9')),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 11),
+            ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor('#1a472a')),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#c8e6c9')),
+            ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, colors.HexColor('#f1f8f4')]),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        elements.append(summary_table)
+        elements.append(Spacer(1, 25))
+        
+        # Amortization Schedule Heading
+        amort_heading = Paragraph("<b>AMORTIZATION SCHEDULE</b>", heading_style)
+        elements.append(amort_heading)
+        elements.append(Spacer(1, 10))
+        
+        # Create amortization table data
+        schedule = amortization_data['schedule']
+        
+        # Table headers
+        amort_data = [
+            ['Month', 'EMI Payment', 'Principal', 'Interest', 'Balance']
+        ]
+        
+        # Add all schedule rows
+        for item in schedule:
+            amort_data.append([
+                str(item['month']),
+                f"₹{item['payment']:,.2f}",
+                f"₹{item['principal']:,.2f}",
+                f"₹{item['interest']:,.2f}",
+                f"₹{item['balance']:,.2f}"
+            ])
+        
+        # Create the amortization table
+        amort_table = Table(
+            amort_data,
+            colWidths=[60, 100, 100, 100, 100],
+            repeatRows=1  # Repeat header on each page
+        )
+        
+        # Style the amortization table
+        amort_table.setStyle(TableStyle([
+            # Header row styling
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a472a')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            
+            # Data rows styling
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # Month column centered
+            ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),  # Amount columns right-aligned
+            
+            # Alternating row colors
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+            
+            # Grid and borders
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BOX', (0, 0), (-1, -1), 1.5, colors.HexColor('#1a472a')),
+            
+            # Padding
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            
+            # Vertical alignment
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        
+        elements.append(amort_table)
+        elements.append(Spacer(1, 20))
+        
+        # Footer section
+        footer_text = Paragraph(
+            "<b>Terms and Conditions:</b><br/>"
+            "1. The loan amount will be disbursed to your registered bank account within 3-5 business days.<br/>"
+            "2. EMI payments are due on the same date each month.<br/>"
+            "3. Late payment charges of 2% per month will apply for overdue payments.<br/>"
+            "4. No prepayment penalty for payments made after 6 months.<br/><br/>"
+            "<b>For any queries, please contact:</b><br/>"
+            "Customer Care: 1800-209-8800 | Email: support@tatacapital.com<br/><br/>"
+            "Thank you for choosing Tata Capital!",
+            normal_style
+        )
+        elements.append(footer_text)
+        
+        # Build the PDF
+        doc.build(elements)
+        
+        print(f"Enhanced PDF saved to: {file_path}")
         return file_path
+        
     except Exception as e:
         print(f"Error generating PDF: {e}")
         return f"Error: Could not generate PDF. {e}"
+
 
 @tool
 def check_file_storage_tool(customer_id: int) -> dict:
@@ -180,15 +374,72 @@ def check_file_storage_tool(customer_id: int) -> dict:
         print("File Not Found.")
         return {"status": "Not Found"}
 
+@tool
+def calculate_amortization_schedule_tool(amount: int, interest_rate: float, tenure_years: int) -> dict:
+    """Calculates the whole loan amortization schedule for each month,
+    showing how much money is going towards interest and how much towards principle"""
 
+    print('---------Calculating amortization schedule---------')
+    try:
+        monthly_rate = interest_rate/100/12
+        total_months = tenure_years/12
+        monthly_payment = amount*(monthly_rate*(1+monthly_rate)**total_months)/((monthly_rate*((1+monthly_rate)**total_months))-1)
 
-#9876543210
+        schedule = []
+        total_interest = 0
+        balance = amount
+
+        for i in  range(1, total_months+1):
+            monthly_interest_payment = monthly_payment*monthly_rate
+            monthly_principle_payment = monthly_payment - monthly_interest_payment
+            balance -= monthly_payment
+            total_interest += monthly_interest_payment
+
+            if i == total_months:
+                    monthly_principle_payment += balance
+                    balance = 0
+
+            schedule.append({
+                'month': i,
+                'payment': round(monthly_payment, 2),
+                'interest': round(monthly_interest_payment, 2),
+                'principle': round(monthly_principle_payment, 2),
+                'balance': round(balance, 2)
+            })
+        return {
+                "status": "success",
+                "monthly_payment": round(monthly_payment, 2),
+                "total_payment": round(monthly_payment * total_months, 2),
+                "total_interest": round(total_interest, 2),
+                "schedule": schedule
+            }
+        
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@tool
+def get_loan_detail_tool(application_id: str):
+    """
+    Retrieves loan details from the database for a given application ID.
+    This allows users to query their existing loans.
+    """
+    try:
+        response = requests.get(FETCH_APPLICATION_URL, params=application_id)
+        if response.status_code == 200:
+            return {'status': 'success', 'loan': response.json()}
+        else:
+            return {'status': 'not_found', 'detail': 'loan_not_found'}
+
+    except Exception as e:
+        return {'status': 'error', 'details': str(e)}
+     
+
 
 
 
 class Loan_agent_state(TypedDict):
     #contains message history of both human and agent
-    messages : Annotated[List[BaseMessage], operator.add]
+    messages : Annotated[List[Union[BaseMessage,BaseStringMessagePromptTemplate, BaseChatPromptTemplate]], operator.add]
 
     customer_phone : Optional[str]
     customer_details : Optional[dict]
@@ -204,14 +455,20 @@ class Loan_agent_state(TypedDict):
     routing_decision : str
 
     presented_options : Optional[List[LoanDetails]]
-    selected_loan : Optional[List[LoanDetails]]
+    selected_loan : Optional[LoanDetails]
+    offers_just_presented : Optional[bool]
+
+    application_id : Optional[str]
+    loan_approved: Optional[bool]
+    amortization_schedule : Optional[dict]
+    conversation_mode : str
 
 
 
 # SalesAgent node, this node communicated with the user and learn intent. 
 def SalesAgent(state: Loan_agent_state) :
-    prompt = "Greet the user, welcoming them to Tata Capital Personal Loan Services"
     
+    prompt = "Greet the user, welcoming them to Tata Capital Personal Loan Services"
     # Checks if its the first time user is having conversation
     if len(state['messages']) == 1:
         ai_response = llm.invoke(prompt).content
@@ -224,8 +481,15 @@ def SalesAgent(state: Loan_agent_state) :
 
         # checking if the customer has been presented with loan options
         # also checking if the customer has selected a loan or not
+        if state.get('loan_approved') and isinstance(last_message_obj, HumanMessage):
+            print('----------Loan Approved, checking for loan queries-------------')
+            query_keywords = ['schedule', 'payment', 'amortization', 'balance', 
+                              'interest', 'summary', 'how much', 'monthly']
+            if any(keyword in last_message for keyword in query_keywords):
+                print("---LOGIC: Detected loan query, routing to query handler---")
+                return {"routing_decision": "goto_loan_query"}
 
-        if state.get('sanction_letter_path') and not isinstance(last_message_obj, HumanMessage):
+        elif state.get('sanction_letter_path') and not isinstance(last_message_obj, HumanMessage):
             print("---LOGIC: Presenting final sanction letter---")
             
             customer_name = state.get('customer_details', {}).get('name', 'Customer')
@@ -268,21 +532,13 @@ def SalesAgent(state: Loan_agent_state) :
             return {
                 "routing_decision": "goto_income_verification"
             }
-
-
-        
+      
         elif state.get('presented_options') and not state.get('selected_loan'):
             options_list = state['presented_options']
-            
-            
-            # CHECK 5: The user has replied to the offers.
-            if isinstance(last_message_obj, HumanMessage):
-                print("---LOGIC: User is making a selection. Handing off to extractor.---")
-                return {
-                    "routing_decision": "goto_extraction"
-                }
-            else:
-                print("---LOGIC: Presenting loan offers---")
+    
+            # NEW CHECK: Were offers JUST presented (not a user response yet)?
+            if state.get('offers_just_presented'):
+                print("---LOGIC: Presenting loan offers to user---")
                 formatted_options = []
                 for i, option in enumerate(options_list):
                     option_str = (
@@ -303,15 +559,30 @@ def SalesAgent(state: Loan_agent_state) :
                 
                 return {
                     'messages': [AIMessage(content=final_message)],
+                    'offers_just_presented': False,  # <-- RESET THE FLAG
+                    'routing_decision': 'waiting_for_user'
+                }
+            
+            # CHECK: The user has NOW replied to the offers (after seeing them)
+            elif isinstance(last_message_obj, HumanMessage):
+                print("---LOGIC: User is making a selection. Handing off to extractor.---")
+                return {
+                    "routing_decision": "goto_extraction"
+                }
+            
+            # Fallback - shouldn't happen, but just in case
+            else:
+                print("---LOGIC: Unexpected state in offers section---")
+                return {
                     'routing_decision': 'waiting_for_user'
                 } 
-            
-        
+                         
         #check for phone no if given
         match = re.search(r'\b(\d{10})\b', last_message)
-
+        print('Checked for number in user message')
         #if match found we check if they are not verified
         if match and (not state.get('is_verified')):
+            print('number found but not verified')
             ph_no = match.group(1)
             return {'customer_phone': ph_no, 'routing_decision':'goto_verification'}
         
@@ -319,21 +590,72 @@ def SalesAgent(state: Loan_agent_state) :
         # Checking intent in this part of statements
 
         #if the llm will respond with 'yes' or 'no'
-        intent = llm.invoke(f"Does this user want to start a loan application? Respond with 'yes' or 'no': '{last_message}").content.lower().strip()
+        if not state.get('is_verified'):
+            print('beggining to check intent')
+            loan_keywords = ['loan', 'finance', 'credit', 'need money', 'borrow']
+            message_lower = last_message.lower()
+
+            has_loan_keyword = any(keyword in message_lower for keyword in loan_keywords)
+
+            if has_loan_keyword and not (state.get('is_verified')):
+                print("---LOGIC: Loan keyword detected, verifying intent with LLM---")
         
-        #intent verified to be 'yes'
-        if intent == "yes" and (not state.get('is_verified')) :
-            ask_ph_no = llm.invoke("You are a friendly bank agent. The user wants a loan. Ask them for their 10-digit phone number to begin verification.").content 
-            return {'messages': [AIMessage(content=ask_ph_no)], 'routing_decision':'waiting_for_user'}
+                intent_check_prompt = f"""Analyze if the user wants to apply for a loan or start a loan application.
+
+            User message: "{last_message}"
+
+            Important: 
+            - If they say they DON'T want a loan or are refusing, respond with 'NO'
+            - If they are asking about loans positively or want to apply, respond with 'YES'
+            - If they're just asking questions about loans without wanting to apply yet, respond with 'NO'
+
+            Respond with ONLY 'YES' or 'NO'."""
+                
+                intent_response = llm.invoke(intent_check_prompt).content.upper().strip()
+                    
+                #intent verified to be 'yes'
+                if  'YES' in intent_response:
+                    print("---LOGIC: User wants a loan. Asking for phone number---")
+                    ask_ph_no = llm.invoke("You are a friendly bank agent. The user wants a loan. Ask them for their 10-digit phone number to begin verification.").content 
+                    return {'messages': [AIMessage(content=ask_ph_no)], 'routing_decision':'waiting_for_user'}
+                # Inside your SalesAgent node's final else block:
+                else:
+                    print("---LOGIC: Intent verified as NO (user doesn't want a loan yet)---")
+                    polite_response = llm.invoke(
+                        "You are a friendly bank agent. The user mentioned loans but doesn't want to apply yet. "
+                        "Respond politely and ask how else you can help them."
+                    ).content
+                    return {
+                        'messages': [AIMessage(content=polite_response)], 
+                        'routing_decision': 'waiting_for_user'
+                    }
+
+        # otherwise the agent goes into general chatbot function
         else:
-            general_response = llm.invoke(state['messages']).content
-        
-            return {
-                'messages': [AIMessage(content=general_response)],
-                'routing_decision': 'waiting_for_user'
-            }
-
-
+            print("---FALLBACK: General Chat---")        
+            try:
+                # Use only the last user message for context to keep it conversational
+                last_user_msg = state['messages'][-1].content
+                
+                # Create a conversational prompt
+                chat_prompt = f"""You are a friendly and helpful Tata Capital bank agent. 
+                A customer just said: "{last_user_msg}"
+                
+                Respond naturally and helpfully. If their message is just a greeting, 
+                respond warmly and ask how you can help them with personal loans today.
+                Keep your response concise and friendly."""
+                
+                general_response = llm.invoke(chat_prompt).content
+                return {
+                    'messages': [AIMessage(content=general_response)],
+                    'routing_decision': 'waiting_for_user'
+                }
+            except Exception as e:
+                print(f"ERROR during fallback LLM invoke: {e}")
+                return {
+                    'messages': [AIMessage(content="Sorry, I encountered an issue. Could you please repeat that?")],
+                    'routing_decision': 'waiting_for_user'
+                }
 
 
 def verification_node(state: Loan_agent_state): 
@@ -375,8 +697,6 @@ def verification_node(state: Loan_agent_state):
         }
     
 
-
-
 def present_offers_node(state: Loan_agent_state):
     credit_score = state.get('credit_score')
 
@@ -388,13 +708,15 @@ def present_offers_node(state: Loan_agent_state):
     if api_result.get('status') == 'Success':
         raw_options = api_result['options']
         structured_options = [LoanDetails(**opt) for opt in raw_options]
-        return {'presented_options': structured_options, 'routing_decision': 'goto_sales_agent'}
+        return {
+            'presented_options': structured_options,
+            'offers_just_presented': True, 
+            'routing_decision': 'goto_sales_agent'
+            }
     else: 
         return {'presented_options': [], 'routing_decision': 'goto_sales_agent'}
 
     
-
-
 def extraction_node(state: Loan_agent_state):
 
     options_list = state.get('presented_options')
@@ -431,14 +753,16 @@ Return the JSON object for *only* the selected loan.
             return {'selected_loan': None, 'routing_decision': 'goto_sales_agent'}
         
 
-
-
 def sanction_node(state: Loan_agent_state) -> dict:
     
     
     # 1. Get all data from the state
     customer = state.get('customer_details')
     loan = state.get('selected_loan')
+    amortization_data = state.get('amortization_schedule')
+    # Create a unique loan application id
+    application_id = uuid.uuid4()
+
 
     # 2. Paranoia Check
     if not customer or not loan:
@@ -447,6 +771,7 @@ def sanction_node(state: Loan_agent_state) -> dict:
 
     # 3. Execute Tool 1: Log the application to the DB
     log_result = log_application_tool.invoke({
+        "application_id": application_id,
         "customer_id": customer['id'],
         "plan_name": loan.plan_name,
         "amount": loan.amount,
@@ -466,7 +791,8 @@ def sanction_node(state: Loan_agent_state) -> dict:
         "customer_name": customer['name'],
         "amount": loan.amount,
         "interest_rate": loan.interest_rate,
-        "tenure_years": loan.tenure_years
+        "tenure_years": loan.tenure_years,
+        "amortization_data": amortization_data
     })
 
     if "Error:" in letter_path:
@@ -479,7 +805,6 @@ def sanction_node(state: Loan_agent_state) -> dict:
         "sanction_letter_path": letter_path,
         "routing_decision": "goto_sales_agent" # Hand back for the final message
     }
-
 
 
 def income_check_node(state: Loan_agent_state):
@@ -496,9 +821,7 @@ def income_check_node(state: Loan_agent_state):
         elif selected_loan_amount > pre_approval_limit and selected_loan_amount <= (2 * pre_approval_limit):
             return {'needs_income_proof': True, 'is_income_verified': False, 'routing_decision': 'goto_sales_agent'}
         else:
-            {"selected_loan": None, "routing_decision": "goto_sales_agent"}
-
-
+            return {"selected_loan": None, "routing_decision": "goto_sales_agent"}
 
 
 
@@ -543,6 +866,119 @@ def verify_income_node(state: Loan_agent_state) -> dict:
         }
     
 
+def calculate_amortization_schedule_node(state: Loan_agent_state): 
+    print('-----------Calculating Amortixation Schedule-------------')
+
+    loan = state.get('selected_loan')
+    if not loan: 
+        print('Loan does not exists')
+
+    schedule_result = calculate_amortization_schedule_tool.invoke({
+        'amount': loan.amount,
+        'interest_rate': loan.interest_rate,
+        'tenure_years': loan.tenure_years
+    })
+
+    try:
+        if schedule_result.get('status') == 200:
+            return {'amortization_schedule': schedule_result,
+                    'routing_decision': 'goto_sanctioning'}
+        
+    except Exception as e:
+        return {'status': 'error', 'detail': str(e)}
+    
+
+def loan_query_handler_node(state: Loan_agent_state) -> dict:
+    """
+    Handles queries about existing loans (amortization, payment details, etc.)
+    """
+    print("---NODE: LoanQueryHandlerNode---")
+    
+    last_message = state['messages'][-1].content.lower()
+    
+    # Check what the user is asking about
+    query_keywords = {
+        'schedule': ['schedule', 'amortization', 'payment breakdown', 'monthly payment'],
+        'summary': ['summary', 'total', 'how much', 'overview'],
+        'balance': ['balance', 'remaining', 'left to pay'],
+        'interest': ['interest', 'how much interest']
+    }
+    
+    query_type = None
+    for qtype, keywords in query_keywords.items():
+        if any(keyword in last_message for keyword in keywords):
+            query_type = qtype
+            break
+    
+    # Get the amortization data
+    schedule_data = state.get('amortization_schedule')
+    loan = state.get('selected_loan')
+    total_months = loan.tenure_years * 12
+    
+    if not schedule_data or not loan:
+        response = "I don't have loan details available. Please complete your application first."
+        return {
+            'messages': [AIMessage(content=response)],
+            'routing_decision': 'waiting_for_user'
+        }
+    
+    # Generate response based on query type
+    if query_type == 'schedule':
+        # Show first 6 months of schedule
+        schedule_preview = schedule_data['schedule'][:total_months]
+        schedule_text = "\n".join([
+            f"Month {item['month']}: Payment ₹{item['payment']:,.2f} "
+            f"(Principal: ₹{item['principal']:,.2f}, Interest: ₹{item['interest']:,.2f}, "
+            f"Balance: ₹{item['balance']:,.2f})"
+            for item in schedule_preview
+        ])
+        
+        response = (
+            f"Here's your amortization schedule for your loan:\n\n{schedule_text}\n\n"
+            f"Monthly Payment: ₹{schedule_data['monthly_payment']:,.2f}\n"
+            f"Would you like to see any other details?"
+        )
+    
+    elif query_type == 'summary':
+        response = (
+            f"**Loan Summary**\n\n"
+            f"Principal Amount: ₹{loan.amount:,.2f}\n"
+            f"Interest Rate: {loan.interest_rate}% per year\n"
+            f"Tenure: {loan.tenure_years} years ({loan.tenure_years * 12} months)\n"
+            f"Monthly Payment: ₹{schedule_data['monthly_payment']:,.2f}\n"
+            f"Total Amount Payable: ₹{schedule_data['total_payment']:,.2f}\n"
+            f"Total Interest: ₹{schedule_data['total_interest']:,.2f}"
+        )
+    
+    elif query_type == 'interest':
+        response = (
+            f"Your total interest over {loan.tenure_years} years will be "
+            f"₹{schedule_data['total_interest']:,.2f}.\n\n"
+            f"This is calculated at {loan.interest_rate}% annual interest rate."
+        )
+    
+    else:
+        # General query - use LLM with context
+        context = (
+            f"Loan Amount: ₹{loan.amount:,}, Interest Rate: {loan.interest_rate}%, "
+            f"Tenure: {loan.tenure_years} years, Monthly Payment: ₹{schedule_data['monthly_payment']:,.2f}, "
+            f"Total Interest: ₹{schedule_data['total_interest']:,.2f}"
+        )
+        
+        prompt = f"""You are a helpful loan advisor. Answer this question about the user's loan:
+        
+User Question: {state['messages'][-1].content}
+
+Loan Details: {context}
+
+Provide a clear, friendly response."""
+        
+        response = llm.invoke(prompt).content
+    
+    return {
+        'messages': [AIMessage(content=response)],
+        'routing_decision': 'waiting_for_user'
+    }
 
 
 # --- 1. Define the Simple Router Functions ---
@@ -591,6 +1027,9 @@ workflow.add_node("extract_choice", extraction_node)
 workflow.add_node("check_income_policy", income_check_node)
 workflow.add_node("verify_uploaded_income", verify_income_node)
 workflow.add_node("generate_sanction", sanction_node)
+workflow.add_node("calculate_amortization", calculate_amortization_schedule_node)
+workflow.add_node("handle_loan_query", loan_query_handler_node)
+
 
 # --- 4. Set the Entry Point ---
 # All conversations start with the SalesAgent.
@@ -607,6 +1046,7 @@ workflow.add_conditional_edges(
         "goto_verification": "verify_customer",
         "goto_extraction": "extract_choice",
         "goto_income_verification": "verify_uploaded_income",
+        "goto_loan_query": "handle_loan_query",
         "end_conversation": END # The process is finished
     }
 )
@@ -636,7 +1076,7 @@ workflow.add_conditional_edges(
     "check_income_policy",
     income_check_router,
     {
-        "goto_sanctioning": "generate_sanction", # Approved!
+        "goto_sanctioning": "calculate_amortization", # Approved!
         "goto_sales_agent": "sales_agent"        # Needs upload or is rejected
     }
 )
@@ -654,6 +1094,8 @@ workflow.add_conditional_edges(
 # Simple edges for nodes that have only one possible next step
 workflow.add_edge("present_offers", "sales_agent")
 workflow.add_edge("generate_sanction", "sales_agent")
+workflow.add_edge("calculate_amortization", "generate_sanction")
+workflow.add_edge("handle_loan_query", "sales_agent")
 
 
 conn = sqlite3.connect("memory.db", check_same_thread=False)
@@ -664,5 +1106,46 @@ memory = SqliteSaver(conn=conn)
 # 3. Now, compile the app with the *real* saver object
 app = workflow.compile(checkpointer=memory)
 
+# Create a session thread 
+config = {'configurable': {'thread_id': 2}}
+
 print("Graph compiled successfully.")
+
+# make a runnable chatbot with while loop
+
+print("Graph compiled successfully.")
+print("Chatbot started! Type 'exit' to quit.\n")
+
+
+# Create a session thread 
+config = {'configurable': {'thread_id': 5}}
+
+while True:
+    user_input = input('You: ')
+    
+    if user_input.lower() == 'exit':
+        print("Goodbye!")
+        break
+    
+    if not user_input.strip():  # Skip empty inputs
+        continue
+    
+    try:
+        # Invoke the graph with the new message
+        input_data = {'messages': [HumanMessage(content=user_input)]}
+        final_state = app.invoke(input_data, config=config)
+        
+        # Get the last AI message
+        ai_response = final_state['messages'][-1]
+        
+        # Only print if it's an AI message
+        if isinstance(ai_response, AIMessage):
+            print(f'\nAssistant: {ai_response.content}\n')
+        else:
+            print(f'\nAssistant: {ai_response}\n')
+            
+    except Exception as e:
+        print(f"\nError: {e}\n")
+        print("Please try again.")
+
 

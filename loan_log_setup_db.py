@@ -24,8 +24,8 @@ def create_applications_table():
     # 2. Define the table structure
     # This table will store the final, approved loan details
     create_table_sql = """
-    CREATE TABLE IF NOT EXISTS applications (
-        application_id SERIAL PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS applications2 (
+        application_id TEXT PRIMARY KEY,
         customer_id INTEGER REFERENCES customers(id),
         plan_name TEXT NOT NULL,
         amount INTEGER NOT NULL,
@@ -53,7 +53,7 @@ def create_applications_table():
         
         cursor.execute(create_table_sql)
         conn.commit()
-        print("Table 'applications' created successfully (or already exists).")
+        print("Table 'applications2' created successfully (or already exists).")
             
     except psycopg2.Error as e:
         print(f"An error occurred with the database: {e}")

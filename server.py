@@ -138,7 +138,40 @@ def get_loan_options(credit_score: int):
         if conn:
             psql_pool.putconn(conn)
 
-@app.post("/applications/log")
+@app.get("/applications")
+def fetch_application(application_id: str):
+    """Mock API endpoint for fetching the loan application details based on application id """
+    query = "SELECT * from applications2 WHERE application_id = %s"
+    conn = None
+    cursor = None
+
+    conn = psql_pool.getconn()
+    cursor = conn.cursor()
+
+    cursor.execute(query, (application_id,))
+    
+
+    try:
+        application = query.fetchone()
+        if not application:
+            print("Application does not exist")
+            return {"status": "No Options Found", "options": ()}
+        
+        print("Found the loan application! ")
+        return {'status': 'Success', 'application': application}
+    
+    except:
+        raise HTTPException(status_code=500)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            psql_pool.putconn(conn)
+        
+
+
+
+@app.post("/applications2/log")
 def log_application(loan_log: LoanApplicationLog):
     """
     Logs a finalized loan application into the 'applications' table.
