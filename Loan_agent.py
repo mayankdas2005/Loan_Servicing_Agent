@@ -33,7 +33,7 @@ llm = ChatGoogleGenerativeAI(model='gemini-2.5-flash', google_api_key=api_key)
 
 class LoanDetails(BaseModel):
     plan_name: str = Field(description="The name of the loan plan selected.") # <-- ADD THIS LINE
-    amount: int = Field(description="The principal amount of the loan.")
+    amount: int = Field(description="The principle amount of the loan.")
     interest_rate: float = Field(description="The annual interest rate (e.g., 8.5).")
     tenure_years: int = Field(description="The loan tenure in years.")
 
@@ -133,7 +133,7 @@ def generate_sanction_letter_tool(
     amount: int, 
     interest_rate: float, 
     tenure_years: int,
-    amortization_data: dict
+    amortization_data: Optional[dict]
 ) -> str:
     """
     Generates a professional PDF sanction letter with a complete amortization schedule table.
@@ -232,7 +232,7 @@ def generate_sanction_letter_tool(
         total_interest = amortization_data['total_interest']
         
         loan_summary_data = [
-            ['Principal Amount', f'₹{amount:,.2f}'],
+            ['Principle Amount', f'₹{amount:,.2f}'],
             ['Interest Rate (p.a.)', f'{interest_rate}%'],
             ['Loan Tenure', f'{tenure_years} years ({tenure_years * 12} months)'],
             ['Monthly EMI', f'₹{monthly_payment:,.2f}'],
@@ -267,7 +267,7 @@ def generate_sanction_letter_tool(
         
         # Table headers
         amort_data = [
-            ['Month', 'EMI Payment', 'Principal', 'Interest', 'Balance']
+            ['Month', 'EMI Payment', 'Principle', 'Interest', 'Balance']
         ]
         
         # Add all schedule rows
@@ -275,7 +275,7 @@ def generate_sanction_letter_tool(
             amort_data.append([
                 str(item['month']),
                 f"₹{item['payment']:,.2f}",
-                f"₹{item['principal']:,.2f}",
+                f"₹{item['principle']:,.2f}",
                 f"₹{item['interest']:,.2f}",
                 f"₹{item['balance']:,.2f}"
             ])
@@ -382,7 +382,7 @@ def calculate_amortization_schedule_tool(amount: int, interest_rate: float, tenu
     print('---------Calculating amortization schedule---------')
     try:
         monthly_rate = interest_rate/100/12
-        total_months = tenure_years/12
+        total_months = tenure_years*12
         monthly_payment = amount*(monthly_rate*(1+monthly_rate)**total_months)/((monthly_rate*((1+monthly_rate)**total_months))-1)
 
         schedule = []
@@ -390,9 +390,9 @@ def calculate_amortization_schedule_tool(amount: int, interest_rate: float, tenu
         balance = amount
 
         for i in  range(1, total_months+1):
-            monthly_interest_payment = monthly_payment*monthly_rate
+            monthly_interest_payment = balance*monthly_rate
             monthly_principle_payment = monthly_payment - monthly_interest_payment
-            balance -= monthly_payment
+            balance -= monthly_principle_payment
             total_interest += monthly_interest_payment
 
             if i == total_months:
@@ -406,13 +406,16 @@ def calculate_amortization_schedule_tool(amount: int, interest_rate: float, tenu
                 'principle': round(monthly_principle_payment, 2),
                 'balance': round(balance, 2)
             })
-        return {
+        result =  {
                 "status": "success",
                 "monthly_payment": round(monthly_payment, 2),
                 "total_payment": round(monthly_payment * total_months, 2),
                 "total_interest": round(total_interest, 2),
                 "schedule": schedule
             }
+
+        print(f"---DEBUG: Amortization calculated successfully. Monthly: ₹{result['monthly_payment']}---")
+        return result
         
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -466,196 +469,227 @@ class Loan_agent_state(TypedDict):
 
 
 # SalesAgent node, this node communicated with the user and learn intent. 
-def SalesAgent(state: Loan_agent_state) :
+def SalesAgent(state: Loan_agent_state):
+    """
+    Main conversational agent that handles user interaction and routing.
+    """
+    # Prevent extremely long conversations
+    if len(state['messages']) > 60:
+        reset_msg = (
+            "I notice we've been chatting for quite a while! "
+            "Let's start fresh. How can I help you with a personal loan today?"
+        )
+        return {
+            'messages': [AIMessage(content=reset_msg)],
+            'routing_decision': 'waiting_for_user'
+        }
     
-    prompt = "Greet the user, welcoming them to Tata Capital Personal Loan Services"
-    # Checks if its the first time user is having conversation
+    # CHECK 1: First time interaction - greet the user
     if len(state['messages']) == 1:
+        print("---LOGIC: First interaction, greeting user---")
+        prompt = (
+            "You are a friendly Tata Capital bank agent. "
+            "Greet the user warmly and introduce yourself as their personal loan assistant. "
+            "Keep it brief and welcoming."
+        )
         ai_response = llm.invoke(prompt).content
-        return {'messages': [AIMessage(content=ai_response)], 'routing_decision':'waiting_for_user'}
+        return {
+            'messages': [AIMessage(content=ai_response)], 
+            'routing_decision': 'waiting_for_user'
+        }
     
-    #check2
-    elif len(state['messages']) > 1:
-        last_message = state['messages'][-1].content
-        last_message_obj = state['messages'][-1]
-
-        # checking if the customer has been presented with loan options
-        # also checking if the customer has selected a loan or not
-        if state.get('loan_approved') and isinstance(last_message_obj, HumanMessage):
-            print('----------Loan Approved, checking for loan queries-------------')
-            query_keywords = ['schedule', 'payment', 'amortization', 'balance', 
-                              'interest', 'summary', 'how much', 'monthly']
-            if any(keyword in last_message for keyword in query_keywords):
-                print("---LOGIC: Detected loan query, routing to query handler---")
-                return {"routing_decision": "goto_loan_query"}
-
-        elif state.get('sanction_letter_path') and not isinstance(last_message_obj, HumanMessage):
-            print("---LOGIC: Presenting final sanction letter---")
+    # For all subsequent checks, we need the last message
+    last_message_obj = state['messages'][-1]
+    last_message = last_message_obj.content
+    
+    # CHECK 2: Post-approval - sanction letter ready
+    if state.get('sanction_letter_path') and not isinstance(last_message_obj, HumanMessage):
+        print("---LOGIC: Presenting final sanction letter---")
+        
+        customer_name = state.get('customer_details', {}).get('name', 'Customer')
+        letter_path = state.get('sanction_letter_path')
+        
+        final_message = (
+            f"Congratulations, {customer_name}! Your loan has been approved. 🎉\n\n"
+            f"📄 You can download your sanction letter here: {letter_path}\n\n"
+            "The letter includes your complete amortization schedule.\n\n"
+            "You can now ask me questions like:\n"
+            "- 'Show me the amortization schedule'\n"
+            "- 'What's my monthly payment?'\n"
+            "- 'Give me a loan summary'\n\n"
+            "Thank you for choosing Tata Capital!"
+        )
+        
+        return {
+            'messages': [AIMessage(content=final_message)],
+            'routing_decision': 'waiting_for_user'  # Continue conversation
+        }
+    
+    # CHECK 3: Post-approval - handle loan queries
+    if state.get('loan_approved') and isinstance(last_message_obj, HumanMessage):
+        print("---LOGIC: Loan approved, checking for loan queries---")
+        
+        query_keywords = ['schedule', 'payment', 'amortization', 'balance', 
+                         'interest', 'summary', 'how much', 'monthly', 'emi']
+        
+        if any(keyword in last_message.lower() for keyword in query_keywords):
+            print("---LOGIC: Detected loan query, routing to query handler---")
+            return {"routing_decision": "goto_loan_query"}
+    
+    # CHECK 4: Income proof needed - ask for upload
+    if (state.get('needs_income_proof') == True) and \
+       (state.get('is_income_verified') == False) and \
+       (not isinstance(last_message_obj, HumanMessage)):
+        
+        print("---LOGIC: Asking user to upload salary slip---")
+        customer_name = state.get('customer_details', {}).get('name', 'there')
+        customer_id = state.get('customer_id')
+        amount = state.get('selected_loan').amount
+        
+        ask_for_upload_msg = (
+            f"Hi {customer_name}, to proceed with the ₹{amount:,.0f} loan, I need you to verify your income.\n\n"
+            f"Please **upload your latest salary slip** as '{customer_id}_salary_slip.pdf' to the uploads folder.\n\n"
+            "Once you have uploaded the file, please type **'uploaded'** so I can continue."
+        )
+        return {
+            'messages': [AIMessage(content=ask_for_upload_msg)],
+            'routing_decision': 'waiting_for_user'
+        }
+    
+    # CHECK 5: User typed 'uploaded'
+    if (state.get('needs_income_proof') == True) and \
+       isinstance(last_message_obj, HumanMessage) and \
+       ("uploaded" in last_message.lower()):
+        
+        print("---LOGIC: User typed 'uploaded'. Handing off to income verifier.---")
+        return {
+            "routing_decision": "goto_income_verification"
+        }
+    
+    # CHECK 6: Loan options just presented
+    if state.get('presented_options') and not state.get('selected_loan'):
+        options_list = state['presented_options']
+        
+        # Present offers to user
+        if state.get('offers_just_presented'):
+            print("---LOGIC: Presenting loan offers to user---")
+            formatted_options = []
+            for i, option in enumerate(options_list, 1):
+                option_str = (
+                    f"  {i}. ₹{option.amount:,.0f} "
+                    f"at {option.interest_rate:.1f}% interest "
+                    f"for {option.tenure_years} years"
+                )
+                formatted_options.append(option_str)
             
-            customer_name = state.get('customer_details', {}).get('name', 'Customer')
-            letter_path = state.get('sanction_letter_path')
+            customer_name = state.get('customer_details', {}).get('name', 'there')
             
             final_message = (
-                f"Congratulations, {customer_name}! Your loan has been approved. \n\n"
-                f"You can download your sanction letter here: {letter_path}\n\n"
-                "Thank you for choosing Tata Capital!"
+                f"Great news, {customer_name}! "
+                f"Based on your credit profile, here are your loan options:\n\n"
+                f"{chr(10).join(formatted_options)}\n\n"
+                "Please let me know which option you'd like (e.g., 'I'll take option 1')."
             )
             
             return {
                 'messages': [AIMessage(content=final_message)],
-                'routing_decision': 'end_conversation' # This tells the graph to stop
-            }
-        
-        elif (state.get('needs_income_proof') == True) and \
-           (state.get('is_income_verified') == False) and \
-           (not isinstance(last_message_obj, HumanMessage)):
-            
-            print("---LOGIC: Asking user to upload salary slip---")
-            customer_name = state.get('customer_details', {}).get('name', 'there')
-            amount = state.get('selected_loan').amount
-            
-            ask_for_upload_msg = (
-                f"Hi {customer_name}, to proceed with the ₹{amount:,.0f} loan, I need you to verify your income.\n\n"
-                "Please **upload your latest salary slip** (as '{customer_id}_salary_slip.pdf').\n\n"
-                "Once you have uploaded the file, please type **'uploaded'** so I can continue."
-            )
-            return {
-                'messages': [AIMessage(content=ask_for_upload_msg)],
+                'offers_just_presented': False,
                 'routing_decision': 'waiting_for_user'
             }
-
-        # --- CHECK 8 (NEW): Did the user just type 'uploaded'? ---
-        elif (state.get('needs_income_proof') == True) and \
-           ("uploaded" in last_message.lower()):
-            
-            print("---LOGIC: User typed 'uploaded'. Handing off to income verifier.---")
+        
+        # User is making a selection
+        elif isinstance(last_message_obj, HumanMessage):
+            print("---LOGIC: User is making a selection. Handing off to extractor.---")
             return {
-                "routing_decision": "goto_income_verification"
+                "routing_decision": "goto_extraction"
             }
-      
-        elif state.get('presented_options') and not state.get('selected_loan'):
-            options_list = state['presented_options']
     
-            # NEW CHECK: Were offers JUST presented (not a user response yet)?
-            if state.get('offers_just_presented'):
-                print("---LOGIC: Presenting loan offers to user---")
-                formatted_options = []
-                for i, option in enumerate(options_list):
-                    option_str = (
-                        f"  {i+1}. A loan of ₹{option.amount:,.0f} "
-                        f"at {option.interest_rate:.1f}% "
-                        f"for {option.tenure_years} years."
-                    )
-                    formatted_options.append(option_str)
-                
-                customer_name = state.get('customer_details', {}).get('name', 'there')
-                
-                final_message = (
-                    f"Great news, {customer_name}! "
-                    f"Based on your profile, I've found these options for you:\n\n"
-                    f"{'\n'.join(formatted_options)}\n\n"
-                    "Please let me know which option you'd like to proceed with (e.g., 'option 1')."
+    # CHECK 7: Look for phone number in message
+    if not state.get('is_verified'):
+        phone_match = re.search(r'\b(\d{10})\b', last_message)
+        
+        if phone_match:
+            print(f"---LOGIC: Phone number detected: {phone_match.group(1)}---")
+            ph_no = phone_match.group(1)
+            return {
+                'customer_phone': ph_no, 
+                'routing_decision': 'goto_verification'
+            }
+    
+    # CHECK 8: Check for loan intent keywords
+    if not state.get('is_verified') and isinstance(last_message_obj, HumanMessage):
+        loan_keywords = ['loan', 'finance', 'credit', 'need money', 'borrow', 'apply']
+        message_lower = last_message.lower()
+        
+        has_loan_keyword = any(keyword in message_lower for keyword in loan_keywords)
+        
+        if has_loan_keyword:
+            print("---LOGIC: Loan keyword detected, verifying intent with LLM---")
+            
+            intent_check_prompt = f"""Analyze if the user wants to apply for a loan.
+
+User message: "{last_message}"
+
+Important: 
+- If they say they DON'T want a loan or are refusing, respond with 'NO'
+- If they are asking about loans positively or want to apply, respond with 'YES'
+- If they're just asking general questions, respond with 'NO'
+
+Respond with ONLY 'YES' or 'NO'."""
+            
+            intent_response = llm.invoke(intent_check_prompt).content.upper().strip()
+            print(f"---DEBUG: Intent response: '{intent_response}'---")
+            
+            if 'YES' in intent_response:
+                print("---LOGIC: User wants a loan. Asking for phone number---")
+                ask_ph_no = (
+                    "Great! I'd be happy to help you with a personal loan. "
+                    "To get started, could you please provide your 10-digit phone number?"
                 )
-                
                 return {
-                    'messages': [AIMessage(content=final_message)],
-                    'offers_just_presented': False,  # <-- RESET THE FLAG
+                    'messages': [AIMessage(content=ask_ph_no)], 
                     'routing_decision': 'waiting_for_user'
                 }
-            
-            # CHECK: The user has NOW replied to the offers (after seeing them)
-            elif isinstance(last_message_obj, HumanMessage):
-                print("---LOGIC: User is making a selection. Handing off to extractor.---")
-                return {
-                    "routing_decision": "goto_extraction"
-                }
-            
-            # Fallback - shouldn't happen, but just in case
             else:
-                print("---LOGIC: Unexpected state in offers section---")
+                print("---LOGIC: Intent verified as NO---")
+                polite_response = (
+                    "I understand. I'm here to help with any questions about personal loans "
+                    "whenever you're ready. Is there anything else I can assist you with today?"
+                )
                 return {
-                    'routing_decision': 'waiting_for_user'
-                } 
-                         
-        #check for phone no if given
-        match = re.search(r'\b(\d{10})\b', last_message)
-        print('Checked for number in user message')
-        #if match found we check if they are not verified
-        if match and (not state.get('is_verified')):
-            print('number found but not verified')
-            ph_no = match.group(1)
-            return {'customer_phone': ph_no, 'routing_decision':'goto_verification'}
-        
-        # if the last message was not phone number, what was it about? 
-        # Checking intent in this part of statements
-
-        #if the llm will respond with 'yes' or 'no'
-        if not state.get('is_verified'):
-            print('beggining to check intent')
-            loan_keywords = ['loan', 'finance', 'credit', 'need money', 'borrow']
-            message_lower = last_message.lower()
-
-            has_loan_keyword = any(keyword in message_lower for keyword in loan_keywords)
-
-            if has_loan_keyword and not (state.get('is_verified')):
-                print("---LOGIC: Loan keyword detected, verifying intent with LLM---")
-        
-                intent_check_prompt = f"""Analyze if the user wants to apply for a loan or start a loan application.
-
-            User message: "{last_message}"
-
-            Important: 
-            - If they say they DON'T want a loan or are refusing, respond with 'NO'
-            - If they are asking about loans positively or want to apply, respond with 'YES'
-            - If they're just asking questions about loans without wanting to apply yet, respond with 'NO'
-
-            Respond with ONLY 'YES' or 'NO'."""
-                
-                intent_response = llm.invoke(intent_check_prompt).content.upper().strip()
-                    
-                #intent verified to be 'yes'
-                if  'YES' in intent_response:
-                    print("---LOGIC: User wants a loan. Asking for phone number---")
-                    ask_ph_no = llm.invoke("You are a friendly bank agent. The user wants a loan. Ask them for their 10-digit phone number to begin verification.").content 
-                    return {'messages': [AIMessage(content=ask_ph_no)], 'routing_decision':'waiting_for_user'}
-                # Inside your SalesAgent node's final else block:
-                else:
-                    print("---LOGIC: Intent verified as NO (user doesn't want a loan yet)---")
-                    polite_response = llm.invoke(
-                        "You are a friendly bank agent. The user mentioned loans but doesn't want to apply yet. "
-                        "Respond politely and ask how else you can help them."
-                    ).content
-                    return {
-                        'messages': [AIMessage(content=polite_response)], 
-                        'routing_decision': 'waiting_for_user'
-                    }
-
-        # otherwise the agent goes into general chatbot function
-        else:
-            print("---FALLBACK: General Chat---")        
-            try:
-                # Use only the last user message for context to keep it conversational
-                last_user_msg = state['messages'][-1].content
-                
-                # Create a conversational prompt
-                chat_prompt = f"""You are a friendly and helpful Tata Capital bank agent. 
-                A customer just said: "{last_user_msg}"
-                
-                Respond naturally and helpfully. If their message is just a greeting, 
-                respond warmly and ask how you can help them with personal loans today.
-                Keep your response concise and friendly."""
-                
-                general_response = llm.invoke(chat_prompt).content
-                return {
-                    'messages': [AIMessage(content=general_response)],
+                    'messages': [AIMessage(content=polite_response)], 
                     'routing_decision': 'waiting_for_user'
                 }
-            except Exception as e:
-                print(f"ERROR during fallback LLM invoke: {e}")
-                return {
-                    'messages': [AIMessage(content="Sorry, I encountered an issue. Could you please repeat that?")],
-                    'routing_decision': 'waiting_for_user'
-                }
+    
+    # FALLBACK: General conversation
+    print("---FALLBACK: General Chat---")
+    
+    try:
+        # Create a conversational prompt
+        chat_prompt = f"""You are a friendly and helpful Tata Capital bank agent named Alex. 
+A customer just said: "{last_message}"
+
+Respond naturally, warmly, and helpfully. Keep your response concise (2-3 sentences).
+If it's a greeting, respond warmly and ask how you can help with personal loans.
+Stay professional but friendly."""
+        
+        # Get the LLM response - extract .content immediately
+        llm_response = llm.invoke(chat_prompt)
+        general_response = llm_response.content  # ← CRITICAL: Extract content here!
+        
+        print(f"---DEBUG: Generated response: {general_response[:50]}...---")
+        
+        return {
+            'messages': [AIMessage(content=general_response)],
+            'routing_decision': 'waiting_for_user'
+        }
+        
+    except Exception as e:
+        print(f"ERROR during fallback LLM invoke: {e}")
+        return {
+            'messages': [AIMessage(content="Sorry, I encountered an issue. Could you please repeat that?")],
+            'routing_decision': 'waiting_for_user'
+        }
 
 
 def verification_node(state: Loan_agent_state): 
@@ -761,7 +795,7 @@ def sanction_node(state: Loan_agent_state) -> dict:
     loan = state.get('selected_loan')
     amortization_data = state.get('amortization_schedule')
     # Create a unique loan application id
-    application_id = uuid.uuid4()
+    application_id = str(uuid.uuid4())
 
 
     # 2. Paranoia Check
@@ -867,22 +901,40 @@ def verify_income_node(state: Loan_agent_state) -> dict:
     
 
 def calculate_amortization_schedule_node(state: Loan_agent_state): 
-    print('-----------Calculating Amortixation Schedule-------------')
+    print('-----------Calculating Amortisation Schedule-------------')
 
     loan = state.get('selected_loan')
     if not loan: 
         print('Loan does not exists')
+        return {
+            "messages": [AIMessage(content="Error: No loan details found.")],
+            "routing_decision": "goto_sales_agent"
+        }
+    print(f"---DEBUG: Loan details - Amount: ₹{loan.amount}, Rate: {loan.interest_rate}%, Tenure: {loan.tenure_years} years---")
 
-    schedule_result = calculate_amortization_schedule_tool.invoke({
-        'amount': loan.amount,
-        'interest_rate': loan.interest_rate,
-        'tenure_years': loan.tenure_years
-    })
-
-    try:
-        if schedule_result.get('status') == 200:
-            return {'amortization_schedule': schedule_result,
-                    'routing_decision': 'goto_sanctioning'}
+    try:    
+        schedule_result = calculate_amortization_schedule_tool.invoke({
+            'amount': loan.amount,
+            'interest_rate': loan.interest_rate,
+            'tenure_years': loan.tenure_years
+        })
+        print(f"---DEBUG: Tool returned type: {type(schedule_result)}---")
+        print(f"---DEBUG: Tool returned status: {schedule_result.get('status') if isinstance(schedule_result, dict) else 'NOT A DICT'}---")
+        
+        if isinstance(schedule_result, dict) and schedule_result.get('status') == 'success':
+            print(f"---SUCCESS: Amortization calculated. Monthly EMI: ₹{schedule_result['monthly_payment']}---")
+            
+            # CRITICAL: Return this to UPDATE the state
+            return {
+                "amortization_schedule": schedule_result,
+                "routing_decision": "goto_sanctioning"
+            }
+        else:
+            print(f"---ERROR: Calculation failed or returned wrong format---")
+            return {
+                "messages": [AIMessage(content="Error: Could not calculate amortization schedule.")],
+                "routing_decision": "goto_sales_agent"
+            }
         
     except Exception as e:
         return {'status': 'error', 'detail': str(e)}
@@ -928,7 +980,7 @@ def loan_query_handler_node(state: Loan_agent_state) -> dict:
         schedule_preview = schedule_data['schedule'][:total_months]
         schedule_text = "\n".join([
             f"Month {item['month']}: Payment ₹{item['payment']:,.2f} "
-            f"(Principal: ₹{item['principal']:,.2f}, Interest: ₹{item['interest']:,.2f}, "
+            f"(Principle: ₹{item['principle']:,.2f}, Interest: ₹{item['interest']:,.2f}, "
             f"Balance: ₹{item['balance']:,.2f})"
             for item in schedule_preview
         ])
@@ -942,7 +994,7 @@ def loan_query_handler_node(state: Loan_agent_state) -> dict:
     elif query_type == 'summary':
         response = (
             f"**Loan Summary**\n\n"
-            f"Principal Amount: ₹{loan.amount:,.2f}\n"
+            f"Principle Amount: ₹{loan.amount:,.2f}\n"
             f"Interest Rate: {loan.interest_rate}% per year\n"
             f"Tenure: {loan.tenure_years} years ({loan.tenure_years * 12} months)\n"
             f"Monthly Payment: ₹{schedule_data['monthly_payment']:,.2f}\n"
@@ -1086,7 +1138,7 @@ workflow.add_conditional_edges(
     "verify_uploaded_income",
     income_verify_router,
     {
-        "goto_sanctioning": "generate_sanction", # File found, approved!
+        "goto_sanctioning": "calculate_amortization", # File found, approved!
         "goto_sales_agent": "sales_agent"        # File not found
     }
 )
@@ -1118,7 +1170,7 @@ print("Chatbot started! Type 'exit' to quit.\n")
 
 
 # Create a session thread 
-config = {'configurable': {'thread_id': 5}}
+config = {'configurable': {'thread_id': 13}}
 
 while True:
     user_input = input('You: ')
