@@ -30,7 +30,7 @@ api_key = os.environ.get('API_KEY')
 
 llm = ChatGoogleGenerativeAI(model='gemini-2.5-flash', google_api_key=api_key)
 
-
+#Structuring llm for giving exactly the loan details
 class LoanDetails(BaseModel):
     plan_name: str = Field(description="The name of the loan plan selected.") # <-- ADD THIS LINE
     amount: int = Field(description="The principle amount of the loan.")
@@ -39,24 +39,29 @@ class LoanDetails(BaseModel):
 
 structured_llm = llm.with_structured_output(LoanDetails)
 
+#Structuring llm for intent verfication of user's account at Tata Capital
+class ExistingUser(BaseModel):
+    existing_user = bool = Field(description = "True if the user is existing customer, false otherwise.")
 
-#tools are here 
+existing_user_llm = llm.with_structured_output(ExistingUser)
+
+
+#Tools are here 
 CRM_API_URL = "http://localhost:8000/crm/verify"
 LOAN_API_URL = "http://localhost:8000/loans/options"
 LOG_API_URL = "http://localhost:8000/applications2/log"
 FETCH_APPLICATION_URL = "http://localhost:8000/applications2"
+ADD_CUSTOMER_URL = "http://localhost:8000/add_customer"
 UPLOAD_DIRECTORY = "./uploads/"
 
-
-
 @tool
-def get_customer_details_tool(phone : str):
+def get_customer_details_tool(phone : str, pin : str):
     """
     Searches the CRM database for customer details using their phone number.
     Returns a dictionary with customer data if found, or an error if not.
     """
     try:
-        response = requests.get(CRM_API_URL, params={'phone': phone})
+        response = requests.get(CRM_API_URL, params={'phone': phone, 'pin': pin})
 
         if response.status_code == 200:
             print(response)
@@ -436,7 +441,34 @@ def get_loan_detail_tool(application_id: str):
     except Exception as e:
         return {'status': 'error', 'details': str(e)}
      
+@tool
+def add_new_customer(name: str, phone: str, address: str, credit_score: int, pre_approved_limit: int, pin: str ):
+    """Adds a new custoer with all their detals in to the database, making a new account for them"""
 
+    pre_approved_limit = 50000
+    print('-----TOOL Adding customer---------')
+    payload = {
+        'customer_name' : name,
+        'customer_phone' : phone,
+        'customer_address' : address, 
+        'credit_score': credit_score,
+        'pre_approved_limit' : pre_approved_limit,
+        'customer_pin' : pin
+    }
+
+    try:
+        response = requests.post(ADD_CUSTOMER_URL, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        
+        else:
+            return {'status': 'error', 'details': response.text}
+        
+    except Exception as e:
+        return {"status": "error", "detail": f"API connection error: {e}"}
+        
+        
+    
 
 
 
@@ -445,10 +477,12 @@ class Loan_agent_state(TypedDict):
     messages : Annotated[List[Union[BaseMessage,BaseStringMessagePromptTemplate, BaseChatPromptTemplate]], operator.add]
 
     customer_phone : Optional[str]
+    customer_pin : Optional[str]
     customer_details : Optional[dict]
     customer_id : Optional[int]
     credit_score : Optional[int]
     is_verified : bool
+    is_existing : bool
 
     needs_income_proof : Optional[bool]
     is_income_verified : Optional[bool]
@@ -491,19 +525,59 @@ def SalesAgent(state: Loan_agent_state):
             "You are a friendly Tata Capital bank agent. "
             "Greet the user warmly and introduce yourself as their personal loan assistant. "
             "Keep it brief and welcoming."
+            "Ask if the user is an existing customer of Tata Capital"
         )
         ai_response = llm.invoke(prompt).content
         return {
             'messages': [AIMessage(content=ai_response)], 
             'routing_decision': 'waiting_for_user'
         }
-    
+
     # For all subsequent checks, we need the last message
     last_message_obj = state['messages'][-1]
     last_message = last_message_obj.content
     
+
+
+    # Checking is user is an existing customer 
+    if isinstance(last_message, HumanMessage):
+        print('-----------Checking if user is existing customer---------')
+        intent_prompt = """"Analyze the user message to see if they are an existing customer of Tata Capital.
+        user message is : {last_message}
+        """ 
+        intent_result = existing_user_llm.invoke(intent_prompt).content().lower().strip()
+
+        if 'no' in intent_result:
+            print('----------User does not exist------------')
+            ai_response = "It looks like you dont have an account with Tata Capital. Would you like to make an account?"
+            return {
+                'messages': [AIMessage(content=ai_response)],
+                'is_existing' : False,
+                'routing_decision' : 'waiting_for_user',
+            }
+        else:
+            print('----------- User Exists ---------------')
+            assistant_response = "That's great to hear, would you like to explore our loans options or do you have something specific in mind"
+            return {
+                'message' : [AIMessage(content=assistant_response)],
+                'is_existing' : True,
+                'routing_decision' : 'waiting_for_user'
+            }
+            
+            
+        
+
+
+    # Debugging 
+    """print("Before CHECK 2: Post approval and displaying sanction_letter ")
+    if not isinstance(last_message_obj, HumanMessage):
+        print("AI message before")
+    else:
+        print("Human Message")"""
+
+    
     # CHECK 2: Post-approval - sanction letter ready
-    if state.get('sanction_letter_path') and not isinstance(last_message_obj, HumanMessage):
+    if state.get('sanction_letter_path') and not isinstance(last_message_obj, AIMessage):
         print("---LOGIC: Presenting final sanction letter---")
         
         customer_name = state.get('customer_details', {}).get('name', 'Customer')
@@ -607,12 +681,15 @@ def SalesAgent(state: Loan_agent_state):
     # CHECK 7: Look for phone number in message
     if not state.get('is_verified'):
         phone_match = re.search(r'\b(\d{10})\b', last_message)
+        pin_match = re.search(r'\b(\d{10})\b', last_message)
         
-        if phone_match:
+        if phone_match and pin_match:
             print(f"---LOGIC: Phone number detected: {phone_match.group(1)}---")
             ph_no = phone_match.group(1)
+            pin_no = pin_match.group(1)
             return {
                 'customer_phone': ph_no, 
+                'customer_pin' : pin_no,
                 'routing_decision': 'goto_verification'
             }
     
@@ -641,10 +718,10 @@ Respond with ONLY 'YES' or 'NO'."""
             print(f"---DEBUG: Intent response: '{intent_response}'---")
             
             if 'YES' in intent_response:
-                print("---LOGIC: User wants a loan. Asking for phone number---")
+                print("---LOGIC: User wants a loan. Asking for phone number and pin ---")
                 ask_ph_no = (
                     "Great! I'd be happy to help you with a personal loan. "
-                    "To get started, could you please provide your 10-digit phone number?"
+                    "To get started, could you please provide your 10-digit phone number and your 4-digit pin?"
                 )
                 return {
                     'messages': [AIMessage(content=ask_ph_no)], 
@@ -693,19 +770,20 @@ Stay professional but friendly."""
 
 
 def verification_node(state: Loan_agent_state): 
-    # checks phone number and verifies user details 
+    # checks phone number and pin and verifies user details 
 
     phone_to_check = state.get('customer_phone')
+    pin_to_check = state.get('customer_pin')
 
 
-    if not phone_to_check:
-        print("Verification Error: No phone number in state.")
+    if not phone_to_check or not pin_to_check:
+        print("Verification Error: No phone number or pin number in state.")
         return {
             "is_verified": False,
             "routing_decision": "goto_sales_agent"
         }
     
-    api_result = get_customer_details_tool.invoke({"phone": phone_to_check})
+    api_result = get_customer_details_tool.invoke({"phone": phone_to_check, "pin": pin_to_check})
 
 
     if api_result.get('status') == 'Verified':
@@ -1168,9 +1246,9 @@ print("Graph compiled successfully.")
 print("Graph compiled successfully.")
 print("Chatbot started! Type 'exit' to quit.\n")
 
-
+"""
 # Create a session thread 
-config = {'configurable': {'thread_id': 13}}
+config = {'configurable': {'thread_id': 14}}
 
 while True:
     user_input = input('You: ')
@@ -1201,3 +1279,4 @@ while True:
         print("Please try again.")
 
 
+"""

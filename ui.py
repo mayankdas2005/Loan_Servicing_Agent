@@ -4,111 +4,229 @@ import uuid
 from langchain_core.messages import HumanMessage, AIMessage
 
 # --- 1. Import your compiled agent ---
-# This line imports the 'app' variable from your other file.
 from Loan_agent import app, Loan_agent_state
 
 # --- 2. Page Setup ---
 st.set_page_config(
     page_title="Tata Capital Loan Agent",
-    page_icon="🤖",
+    page_icon="🏦",
     layout="wide"
 )
 
-st.title("Tata Capital - Personal Loan Agent 🤖")
+
+# Custom CSS for better appearance
+st.markdown("""
+    <style>
+    .stAlert {
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("🏦 Tata Capital - Personal Loan Assistant")
+st.markdown("*Your intelligent loan application companion*")
 
 # --- 3. Setup the Uploads Directory ---
-# This is for the salary slip
 UPLOAD_DIRECTORY = "./uploads"
 if not os.path.exists(UPLOAD_DIRECTORY):
     os.makedirs(UPLOAD_DIRECTORY)
 
 # --- 4. Session State Management ---
-# This is the most important part of a Streamlit chat app.
-# We need to store the message history and a unique thread_id
-# for LangGraph's persistence.
-
+# Initialize session state variables
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
-    print(f"New session started with thread_id: {st.session_state.thread_id}")
+    print(f"✨ New session started with thread_id: {st.session_state.thread_id}")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ✅ FIX 1: Don't duplicate message storage - LangGraph handles it
+# We only store metadata here, not the full messages
+if "customer_id" not in st.session_state:
+    st.session_state.customer_id = None
 
-# --- 5. The Sidebar for File Uploads ---
+if "file_uploaded" not in st.session_state:
+    st.session_state.file_uploaded = False
+
+if "conversation_started" not in st.session_state:
+    st.session_state.conversation_started = False
+
+if "loan_approved" not in st.session_state:
+    st.session_state.loan_approved = False
+
+# --- 5. Helper Function to Get Current State ---
+def get_current_state():
+    """
+    Retrieves the current state from LangGraph's checkpoint.
+    This is the single source of truth.
+    """
+    try:
+        config = {"configurable": {"thread_id": st.session_state.thread_id}}
+        # Get the current state snapshot from the checkpointer
+        current_state = app.get_state(config)
+        return current_state
+    except Exception as e:
+        print(f"Error getting state: {e}")
+        return None
+
+# --- 6. The Sidebar ---
 with st.sidebar:
-    st.header("Income Verification")
+    st.header("📋 Application Status")
     
-    # We check the session state for a customer_id
-    customer_id = st.session_state.get("customer_id", None)
+    # Display current state information
+    current_state = get_current_state()
     
-    if not customer_id:
-        st.warning("Please verify your phone number in the chat before uploading.")
+    if current_state and current_state.values:
+        state_values = current_state.values
+        
+        # Show verification status
+        if state_values.get("is_verified"):
+            st.success("✅ Identity Verified")
+            customer_name = state_values.get("customer_details", {}).get("name", "N/A")
+            st.info(f"**Customer:** {customer_name}")
+            
+            # Update session state with customer_id
+            if state_values.get("customer_id"):
+                st.session_state.customer_id = state_values["customer_id"]
+        
+        # Show loan approval status
+        if state_values.get("loan_approved"):
+            st.success("🎉 Loan Approved!")
+            st.session_state.loan_approved = True
+    
+    st.divider()
+    
+    # --- Income Verification File Upload ---
+    st.subheader("📄 Income Verification")
+    
+    if not st.session_state.customer_id:
+        st.warning("⚠️ Please verify your phone number in the chat first.")
     else:
-        # The file uploader is active if we have a customer_id
+        st.info(f"**Customer ID:** {st.session_state.customer_id}")
+        
         uploaded_file = st.file_uploader(
-            f"Upload Salary Slip for Customer {customer_id}",
-            type=["pdf"]
+            "Upload Salary Slip (PDF only)",
+            type=["pdf"],
+            help="Upload your latest salary slip for income verification"
         )
         
         if uploaded_file is not None:
-            # Define the expected filename
-            filename = f"{customer_id}_salary_slip.pdf"
-            save_path = os.path.join(UPLOAD_DIRECTORY, filename)
-            
-            # Save the file to the correct location
-            with open(save_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            st.success(f"File saved as {filename}! Please type 'uploaded' in the chat.")
-
-# --- 6. Display Past Chat Messages ---
-# Loop through the messages stored in the session state
-for message in st.session_state.messages:
-    if isinstance(message, AIMessage):
-        with st.chat_message("assistant"):
-            st.markdown(message.content)
-    elif isinstance(message, HumanMessage):
-        with st.chat_message("user"):
-            st.markdown(message.content)
-
-# --- 7. The Chat Input Box ---
-# This is the text box at the bottom of the screen
-if prompt := st.chat_input("Hi, how can I help you?"):
+            try:
+                # Define the expected filename
+                filename = f"{st.session_state.customer_id}_salary_slip.pdf"
+                save_path = os.path.join(UPLOAD_DIRECTORY, filename)
+                
+                # Save the file
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                st.success(f"✅ File saved as `{filename}`")
+                st.info("💬 Type **'uploaded'** in the chat to continue.")
+                st.session_state.file_uploaded = True
+                
+            except Exception as e:
+                st.error(f"❌ Error saving file: {str(e)}")
     
-    # 1. Add the user's message to the session state
-    st.session_state.messages.append(HumanMessage(content=prompt))
+    st.divider()
     
-    # 2. Display the user's message in the chat
-    with st.chat_message("user"):
+    # --- Reset Button ---
+    if st.button("🔄 Start New Conversation", type="secondary"):
+        # Clear the session state
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.customer_id = None
+        st.session_state.file_uploaded = False
+        st.session_state.conversation_started = False
+        st.session_state.loan_approved = False
+        st.rerun()
+
+# --- 7. Display Chat Messages ---
+# ✅ FIX 2: Get messages from LangGraph state, not session_state
+current_state = get_current_state()
+
+if current_state and current_state.values and current_state.values.get("messages"):
+    messages = current_state.values["messages"]
+    
+    # Display all messages except system messages
+    for message in messages:
+        if isinstance(message, AIMessage):
+            with st.chat_message("assistant", avatar="🤖"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(message.content)
+else:
+    # Show welcome message if no conversation yet
+    if not st.session_state.conversation_started:
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown("👋 Welcome! I'm your Tata Capital loan assistant. How can I help you today?")
+
+# --- 8. The Chat Input Box ---
+if prompt := st.chat_input("Type your message here..."):
+    
+    # Mark conversation as started
+    st.session_state.conversation_started = True
+    
+    # Display the user's message immediately
+    with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
     
-    # 3. Show a "thinking" spinner while the agent works
-    with st.chat_message("assistant"):
+    # Show assistant thinking
+    with st.chat_message("assistant", avatar="🤖"):
         with st.spinner("Thinking..."):
-            
-            # 4. Prepare the input for the agent
-            # We only need to send the new human message.
-            # The checkpointer will load the full history.
-            input_data = {"messages": [HumanMessage(content=prompt)]}
-            
-            # This config tells LangGraph which conversation thread to use
-            config = {"configurable": {"thread_id": st.session_state.thread_id}}
-            
-            # 5. Call the agent!
-            # The .invoke() call will run all the nodes (Sales, Verify, etc.)
-            # and only return when the graph hits an END or a wait_for_user.
-            final_state = app.invoke(input_data, config=config)
-            
-            # 6. Extract the agent's last response
-            ai_response = final_state["messages"][-1]
-            
-            # 7. Display the AI's response
-            st.markdown(ai_response.content)
-
-    # 8. Update our session state with the full, new history
-    # This ensures that if we rerun, we have the complete log.
-    st.session_state.messages = final_state["messages"]
+            try:
+                # ✅ FIX 3: Prepare input correctly
+                input_data = {"messages": [HumanMessage(content=prompt)]}
+                config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                
+                # Call the agent
+                final_state = app.invoke(input_data, config=config)
+                
+                # ✅ FIX 4: Handle different response types
+                if final_state and "messages" in final_state:
+                    last_message = final_state["messages"][-1]
+                    
+                    if isinstance(last_message, AIMessage):
+                        response_content = last_message.content
+                    else:
+                        response_content = str(last_message.content)
+                    
+                    # Display the response
+                    st.markdown(response_content)
+                    
+                    # ✅ FIX 5: Update session state metadata
+                    if final_state.get("customer_id"):
+                        st.session_state.customer_id = final_state["customer_id"]
+                    
+                    if final_state.get("loan_approved"):
+                        st.session_state.loan_approved = True
+                        st.balloons()  # Celebration effect!
+                    
+                    # ✅ FIX 6: Check for sanction letter
+                    if final_state.get("sanction_letter_path"):
+                        letter_path = final_state["sanction_letter_path"]
+                        if os.path.exists(letter_path):
+                            with open(letter_path, "rb") as pdf_file:
+                                pdf_bytes = pdf_file.read()
+                                st.download_button(
+                                    label="📄 Download Sanction Letter",
+                                    data=pdf_bytes,
+                                    file_name=os.path.basename(letter_path),
+                                    mime="application/pdf"
+                                )
+                else:
+                    st.error("❌ Received invalid response from agent.")
+                    
+            except Exception as e:
+                st.error(f"❌ An error occurred: {str(e)}")
+                print(f"Error details: {e}")
+                import traceback
+                traceback.print_exc()
     
-    # 9. Update the customer_id in our session state if it was found
-    if final_state.get("customer_id"):
-        st.session_state.customer_id = final_state.get("customer_id")
+    # ✅ FIX 7: Force a rerun to update the sidebar
+    st.rerun()
+
+# --- 9. Footer ---
+st.divider()
+st.markdown("""
+    <div style='text-align: center; color: gray; font-size: 0.8rem;'>
+        <p>🔒 Secure & Confidential | Powered by AI | Tata Capital Personal Loans</p>
+    </div>
+""", unsafe_allow_html=True)

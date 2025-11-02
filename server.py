@@ -63,7 +63,7 @@ app = FastAPI(
 
 # --- 4. The "CRM Server" Endpoint ---
 @app.get("/crm/verify")
-def verify_customer(phone: str):
+def verify_customer(phone: str, pin : str):
     """
     This is the mock CRM API endpoint (the "Verification Agent's" tool).
     It searches the database for a customer by their phone number.
@@ -71,7 +71,7 @@ def verify_customer(phone: str):
     print(f"Received request for /crm/verify with phone: {phone}")
     
     # Define the SQL query
-    query = "SELECT * FROM customers WHERE phone = %s"
+    query = "SELECT * FROM customers WHERE phone = %s and pin = %s"
     
     conn = None
     cursor = None
@@ -81,7 +81,7 @@ def verify_customer(phone: str):
         # Use RealDictCursor to get results as dictionaries (like JSON)
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        cursor.execute(query, (phone,))
+        cursor.execute(query, (phone, pin,))
         customer_data = cursor.fetchone()
         
         if customer_data:
@@ -207,11 +207,52 @@ def log_application(loan_log: LoanApplicationLog):
         
     except Exception as e:
         if conn: conn.rollback()
-        print(f"Database error in /applications/log: {e}")
+        print(f"Database error in /applications2/log: {e}")
         raise HTTPException(status_code=500, detail="Database internal error")
     finally:
         if cursor: cursor.close()
         if conn: psql_pool.putconn(conn)
+
+
+@app.post("/add_customer")
+def add_new_customer(user_details):
+    """Adds a new customer with his/her details to the customers tabale in the database"""
+    print('Adding a new customer and creating his account ')
+
+    query = """INSERT INTO customers (name, phone, address, pre_approved_limit, credit_score, pin)
+    VALUES (%s,%s,%s,%s,%s,%s)"""
+
+    conn = None
+    cursor = None
+
+    try:
+        conn = psql_pool.getconn()
+        cursor = conn.cursor()
+
+        cursor.execute(query, (
+            user_details.name,
+            user_details.phone,
+            user_details.address,
+            user_details.pre_approved_limit,
+            user_details.credit_score,
+            user_details.pin
+        ))
+
+        conn.commit()
+
+        print(f"Sucessfully created account for {user_details.name}")
+        return {'status': 'Success'}
+    
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"Database error in /add_customer: {e}")
+        raise HTTPException(status_code=500, detail="Database internal error")
+    finally:
+        if cursor: cursor.close()
+        if conn: psql_pool.putconn(conn)
+
+
+
 
 # --- 6. The "Run" Command ---
 if __name__ == "__main__":
