@@ -30,7 +30,7 @@ api_key = os.environ.get('API_KEY')
 
 llm = ChatGoogleGenerativeAI(model='gemini-2.5-flash', google_api_key=api_key)
 
-#Structuring llm for giving exactly the loan details
+# Structuring llm for giving exactly the loan details
 class LoanDetails(BaseModel):
     plan_name: str = Field(description="The name of the loan plan selected.") # <-- ADD THIS LINE
     amount: int = Field(description="The principle amount of the loan.")
@@ -39,11 +39,15 @@ class LoanDetails(BaseModel):
 
 structured_llm = llm.with_structured_output(LoanDetails)
 
-#Structuring llm for intent verfication of user's account at Tata Capital
-class ExistingUser(BaseModel):
-    existing_user = bool = Field(description = "True if the user is existing customer, false otherwise.")
 
-existing_user_llm = llm.with_structured_output(ExistingUser)
+class AddNewCustomer(BaseModel):
+    customer_name: str
+    customer_phone : str
+    customer_address : str
+    credit_score : int
+    pin : str
+
+customer_data_llm = llm.with_structured_output(AddNewCustomer)
 
 
 #Tools are here 
@@ -351,7 +355,6 @@ def generate_sanction_letter_tool(
         print(f"Error generating PDF: {e}")
         return f"Error: Could not generate PDF. {e}"
 
-
 @tool
 def check_file_storage_tool(customer_id: int) -> dict:
     """
@@ -442,18 +445,17 @@ def get_loan_detail_tool(application_id: str):
         return {'status': 'error', 'details': str(e)}
      
 @tool
-def add_new_customer(name: str, phone: str, address: str, credit_score: int, pre_approved_limit: int, pin: str ):
-    """Adds a new custoer with all their detals in to the database, making a new account for them"""
+def add_new_customer_tool(name: str, phone: str, address: str, credit_score: int, pin: str , pre_approved_limit: int ) -> dict :
+    """Adds a new customer with all their detals in to the database, making a new account for them"""
 
-    pre_approved_limit = 50000
     print('-----TOOL Adding customer---------')
     payload = {
         'customer_name' : name,
         'customer_phone' : phone,
         'customer_address' : address, 
-        'credit_score': credit_score,
         'pre_approved_limit' : pre_approved_limit,
-        'customer_pin' : pin
+        'credit_score': credit_score,
+        'pin' : pin
     }
 
     try:
@@ -468,9 +470,6 @@ def add_new_customer(name: str, phone: str, address: str, credit_score: int, pre
         return {"status": "error", "detail": f"API connection error: {e}"}
         
         
-    
-
-
 
 class Loan_agent_state(TypedDict):
     #contains message history of both human and agent
@@ -482,7 +481,10 @@ class Loan_agent_state(TypedDict):
     customer_id : Optional[int]
     credit_score : Optional[int]
     is_verified : bool
-    is_existing : bool
+
+    is_existing : Optional[bool]
+    awaiting_registration_details : bool
+    registration_attempt : int
 
     needs_income_proof : Optional[bool]
     is_income_verified : Optional[bool]
@@ -518,6 +520,73 @@ def SalesAgent(state: Loan_agent_state):
             'routing_decision': 'waiting_for_user'
         }
     
+    # CHECK 0: Determine if we need to ask about existing customer status
+    if state.get('is_existing') is None:  # ← Not yet determined
+        print("---LOGIC: Need to determine if customer is existing or new---")
+        
+        last_message_obj = state['messages'][-1]
+        
+        # First message - just greet
+        if len(state['messages']) == 1:
+            print("---LOGIC: First interaction, greeting user---")
+            greeting_msg = (
+                "👋 Hello! Welcome to Tata Capital. I'm Alex, your personal loan assistant.\n\n"
+                "Are you an existing Tata Capital customer?"
+            )
+            return {
+                'messages': [AIMessage(content=greeting_msg)], 
+                'routing_decision': 'waiting_for_user'
+            }
+        
+        # User has responded to greeting - check if they're existing or new
+        elif isinstance(last_message_obj, HumanMessage):
+            message_lower = last_message_obj.content.lower()
+            
+            # User says YES - they're existing
+            if any(word in message_lower for word in ['yes', 'i am', 'existing', 'have account', 'already']):
+                print("---LOGIC: User is existing customer---")
+                
+                ask_details_msg = (
+                    "Great! I'd love to help you with a loan.\n\n"
+                    "Could you please provide:\n"
+                    "1. Your 10-digit phone number\n"
+                    "2. Your 4-digit PIN\n\n"
+                    "This will help me verify your account."
+                )
+                
+                return {
+                    'messages': [AIMessage(content=ask_details_msg)],
+                    'is_existing': True,
+                    'routing_decision': 'waiting_for_user'
+                }
+            
+            # User says NO - they're new
+            elif any(word in message_lower for word in ['no', 'not', 'new', 'don\'t', 'no account', 'first time']):
+                print("---LOGIC: User is NEW customer---")
+                
+                ask_registration_msg = (
+                    "No problem! I'd be happy to help you get started with Tata Capital.\n\n"
+                    "Would you like me to create an account for you right now?"
+                )
+                
+                return {
+                    'messages': [AIMessage(content=ask_registration_msg)],
+                    'is_existing': False,  # ⭐ SET THIS!
+                    'routing_decision': 'waiting_for_user'
+                }
+            
+            # User didn't give a clear answer
+            else:
+                clarify_msg = "Could you please clarify - are you an existing Tata Capital customer? (Yes/No)"
+                return {
+                    'messages': [AIMessage(content=clarify_msg)],
+                    'routing_decision': 'waiting_for_user'
+                }
+    
+    # For all subsequent checks, we need the last message
+    last_message_obj = state['messages'][-1]
+    last_message = last_message_obj.content
+    
     # CHECK 1: First time interaction - greet the user
     if len(state['messages']) == 1:
         print("---LOGIC: First interaction, greeting user---")
@@ -540,29 +609,44 @@ def SalesAgent(state: Loan_agent_state):
 
 
     # Checking is user is an existing customer 
-    if isinstance(last_message, HumanMessage):
-        print('-----------Checking if user is existing customer---------')
-        intent_prompt = """"Analyze the user message to see if they are an existing customer of Tata Capital.
-        user message is : {last_message}
-        """ 
-        intent_result = existing_user_llm.invoke(intent_prompt).content().lower().strip()
+    if (state.get('is_existing') == False) and isinstance(last_message_obj, HumanMessage):
+        
+        # Check if user wants to register
+        if any(word in last_message.lower() for word in ['yes', 'sure', 'okay', 'register', 'sign up', 'create']):
+            print("---LOGIC: User wants to register. Asking for details---")
+            
+            registration_prompt = (
+                "Perfect! Let's get you registered. I'll need the following information:\n\n"
+                "1. **Full Name**\n"
+                "2. **Address**\n"
+                "3. **Credit Score** (if you know it, otherwise I'll estimate 650)\n"
+                "4. **4-digit PIN** (for secure login)\n\n"
+                "Please provide all details in one message. For example:\n"
+                "\"My name is John Doe,My phone number is 9087033224, I live at 123 Main St Chennai, my credit score is 720, and my PIN is 1234\""
+            )
 
-        if 'no' in intent_result:
-            print('----------User does not exist------------')
-            ai_response = "It looks like you dont have an account with Tata Capital. Would you like to make an account?"
             return {
-                'messages': [AIMessage(content=ai_response)],
-                'is_existing' : False,
-                'routing_decision' : 'waiting_for_user',
+                'messages': [AIMessage(content=registration_prompt)],
+                'awaiting_registration_details': True,
+                'routing_decision': 'waiting_for_user'
             }
-        else:
-            print('----------- User Exists ---------------')
-            assistant_response = "That's great to hear, would you like to explore our loans options or do you have something specific in mind"
+        
+        elif any(word in last_message.lower() for word in ['no', 'not now', 'cancel']):
+            print("---LOGIC: User declined registration---")
+            
+            decline_msg = (
+                "No problem! If you'd like to apply for a loan in the future, "
+                "just come back and we'll help you get registered. Have a great day!"
+            )
+            
             return {
-                'message' : [AIMessage(content=assistant_response)],
-                'is_existing' : True,
-                'routing_decision' : 'waiting_for_user'
+                'messages': [AIMessage(content=decline_msg)],
+                'routing_decision': 'end_conversation'
             }
+        
+    if state.get('awaiting_registration_details') and isinstance(last_message_obj, HumanMessage):
+        print("---LOGIC: User provided registration details. Routing to registration node---")
+        return {"routing_decision": "goto_registration"}
             
             
         
@@ -678,10 +762,10 @@ def SalesAgent(state: Loan_agent_state):
                 "routing_decision": "goto_extraction"
             }
     
-    # CHECK 7: Look for phone number in message
+    # CHECK 7: Look for phone number and pin in message
     if not state.get('is_verified'):
         phone_match = re.search(r'\b(\d{10})\b', last_message)
-        pin_match = re.search(r'\b(\d{10})\b', last_message)
+        pin_match = re.search(r'\b(\d{4})\b', last_message)
         
         if phone_match and pin_match:
             print(f"---LOGIC: Phone number detected: {phone_match.group(1)}---")
@@ -793,6 +877,7 @@ def verification_node(state: Loan_agent_state):
         # Update the state with all the customer's data
         return {
             "is_verified": True,
+            "is_existing" : True,
             "customer_details": customer_data,
             "customer_id": customer_data['id'],
             "credit_score": customer_data['credit_score'],
@@ -801,10 +886,16 @@ def verification_node(state: Loan_agent_state):
     
     else:
         print(f"Verification Failed: {api_result.get('detail')}")
+        ask_registration_msg = (
+            f"I couldn't find an account with phone number {phone_to_check}.\n\n"
+            "Would you like to create a new account? Just say **'yes'** and I'll help you register!"
+        )
         
         # Update the state and send back to the SalesAgent to handle
         return {
             "is_verified": False,
+            "is_existing" : False,
+            "messages" : [AIMessage(content=ask_registration_msg)],
             "routing_decision": "goto_sales_agent"
         }
     
@@ -1111,6 +1202,109 @@ Provide a clear, friendly response."""
     }
 
 
+def add_customer_node(state: Loan_agent_state):
+    """
+    Handles new customer registration.
+    Extracts customer details and adds them to the database.
+    """
+    print("---NODE: AddCustomerNode---")
+    
+    last_message_obj = state['messages'][-1]
+    last_message = last_message_obj.content
+    
+    # Only process if we're expecting registration details
+    if not state.get('awaiting_registration_details'):
+        print("Not awaiting registration details. Skipping.")
+        return {"routing_decision": "goto_sales_agent"}
+    
+    # Check if this is a HumanMessage
+    if not isinstance(last_message_obj, HumanMessage):
+        return {"routing_decision": "goto_sales_agent"}
+    
+    print(f"Extracting customer details from: {last_message}")
+    
+    try:
+        # Extract customer data using LLM
+        user_details = customer_data_llm.invoke(last_message)
+        
+        print(f"Extracted details: Name={user_details.customer_name}, Phone={user_details.customer_phone}, Address={user_details.customer_address}")
+        
+        # Add customer to database
+        add_result = add_new_customer_tool.invoke({
+            'name': user_details.customer_name,
+            'phone': user_details.customer_phone,
+            'address': user_details.customer_address,
+            'credit_score': user_details.credit_score,
+            'pre_approved_limit': 50000,
+            'pin': user_details.pin
+        })
+        
+        print(f"Add result: {add_result}")
+        
+        # Check if registration was successful
+        if isinstance(add_result, dict) and add_result.get('status') == 'Success':
+            customer_id = add_result.get('customer_id')
+            
+            success_msg = (
+                f"✅ Great! I've registered you successfully.\n\n"
+                f"**Your Details:**\n"
+                f"- Name: {user_details.customer_name}\n"
+                f"- Phone: {user_details.customer_phone}\n"
+                f"- Customer ID: {customer_id}\n\n"
+                f"Now let me fetch your personalized loan options..."
+            )
+            
+            # Mark as verified and proceed to loan options
+            return {
+                'messages': [AIMessage(content=success_msg)],
+                'is_existing': True,  # Now they exist!
+                'is_verified': True,
+                'customer_id': customer_id,
+                'customer_phone': user_details.customer_phone,
+                'credit_score': user_details.credit_score,
+                'customer_details': {
+                    'id': customer_id,
+                    'name': user_details.customer_name,
+                    'phone': user_details.customer_phone,
+                    'credit_score': user_details.credit_score,
+                    'pre_approved_limit': 50000
+                },
+                'awaiting_registration_details': False,
+                'routing_decision': 'goto_underwriting'  # Go get loan options!
+            }
+        else:
+            # Registration failed
+            error_detail = add_result.get('detail', 'Unknown error')
+            
+            error_msg = (
+                f"❌ Sorry, I couldn't register you: {error_detail}\n\n"
+                "Please try again or contact support."
+            )
+            
+            return {
+                'messages': [AIMessage(content=error_msg)],
+                'awaiting_registration_details': False,
+                'routing_decision': 'goto_sales_agent'
+            }
+    
+    except Exception as e:
+        print(f"Error in add_customer_node: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        error_msg = (
+            f"❌ I encountered an error processing your details: {str(e)}\n\n"
+            "Could you please provide your information again?\n"
+            "Format: Name, Phone, Address, Credit Score, PIN"
+        )
+        
+        return {
+            'messages': [AIMessage(content=error_msg)],
+            'routing_decision': 'waiting_for_user'
+        }
+
+
+
 # --- 1. Define the Simple Router Functions ---
 # These functions just read the 'routing_decision' from the state.
 
@@ -1144,6 +1338,12 @@ def income_verify_router(state: Loan_agent_state) -> str:
     print(f"---ROUTER (IncomeVerify): --> {decision} ---")
     return decision
 
+def registration_router(state: Loan_agent_state) -> str:
+    decision = state.get("routing_decision")
+    print(f"---ROUTER (Registration): --> {decision} ---")
+    return decision
+
+
 # --- 2. Assemble the Graph ---
 
 print("Assembling the agent graph...")
@@ -1159,6 +1359,7 @@ workflow.add_node("verify_uploaded_income", verify_income_node)
 workflow.add_node("generate_sanction", sanction_node)
 workflow.add_node("calculate_amortization", calculate_amortization_schedule_node)
 workflow.add_node("handle_loan_query", loan_query_handler_node)
+workflow.add_node("register_customer", add_customer_node)
 
 
 # --- 4. Set the Entry Point ---
@@ -1174,6 +1375,7 @@ workflow.add_conditional_edges(
     {
         "waiting_for_user": END,  # Stop and wait for the next human input
         "goto_verification": "verify_customer",
+        "goto_registration": "register_customer",
         "goto_extraction": "extract_choice",
         "goto_income_verification": "verify_uploaded_income",
         "goto_loan_query": "handle_loan_query",
@@ -1218,6 +1420,16 @@ workflow.add_conditional_edges(
     {
         "goto_sanctioning": "calculate_amortization", # File found, approved!
         "goto_sales_agent": "sales_agent"        # File not found
+    }
+)
+
+workflow.add_conditional_edges(
+    "register_customer",
+    registration_router,
+    {
+        "goto_underwriting": "present_offers",  # Success - get loan options
+        "goto_sales_agent": "sales_agent",      # Failure - back to chat
+        "waiting_for_user": END                 # Waiting for more info
     }
 )
 

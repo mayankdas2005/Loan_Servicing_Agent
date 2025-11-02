@@ -36,6 +36,13 @@ class LoanApplicationLog(BaseModel):
     interest_rate: float
     tenure_years: int
 
+class AddNewCustomer(BaseModel):
+    customer_name: str
+    customer_phone : str
+    customer_address : str
+    pre_approved_limit : int
+    credit_score : int
+    pin : str
 
 
 # --- 2. Create a Connection Pool ---
@@ -215,7 +222,7 @@ def log_application(loan_log: LoanApplicationLog):
 
 
 @app.post("/add_customer")
-def add_new_customer(user_details):
+def add_new_customer(user_details : AddNewCustomer):
     """Adds a new customer with his/her details to the customers tabale in the database"""
     print('Adding a new customer and creating his account ')
 
@@ -230,9 +237,9 @@ def add_new_customer(user_details):
         cursor = conn.cursor()
 
         cursor.execute(query, (
-            user_details.name,
-            user_details.phone,
-            user_details.address,
+            user_details.customer_name,
+            user_details.customer_phone,
+            user_details.customer_address,
             user_details.pre_approved_limit,
             user_details.credit_score,
             user_details.pin
@@ -240,7 +247,7 @@ def add_new_customer(user_details):
 
         conn.commit()
 
-        print(f"Sucessfully created account for {user_details.name}")
+        print(f"Sucessfully created account for {user_details.customer_name}")
         return {'status': 'Success'}
     
     except Exception as e:
