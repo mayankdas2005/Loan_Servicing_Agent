@@ -30,6 +30,7 @@ DATABASE_URL = f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{
 
 
 class LoanApplicationLog(BaseModel):
+    application_id : str
     customer_id: int
     plan_name: str
     amount: int
@@ -186,9 +187,8 @@ def log_application(loan_log: LoanApplicationLog):
     print(f"Received request to log application for customer: {loan_log.customer_id}")
     
     query = """
-    INSERT INTO applications (customer_id, plan_name, amount, interest_rate, tenure_years)
+    INSERT INTO applications2 (application_id, customer_id, plan_name, amount, interest_rate, tenure_years)
     VALUES (%s, %s, %s, %s, %s)
-    RETURNING application_id
     """
     
     conn = None
@@ -198,6 +198,7 @@ def log_application(loan_log: LoanApplicationLog):
         cursor = conn.cursor()
         
         cursor.execute(query, (
+            loan_log.application_id,
             loan_log.customer_id,
             loan_log.plan_name,
             loan_log.amount,
@@ -206,11 +207,10 @@ def log_application(loan_log: LoanApplicationLog):
         ))
         
         # Get the new application_id that the database generated
-        new_app_id = cursor.fetchone()[0]
         conn.commit()
         
-        print(f"Successfully logged new application with ID: {new_app_id}")
-        return {"status": "success", "application_id": new_app_id}
+        print(f"Successfully logged new application with ID: {loan_log.application_id}")
+        return {"status": "success", "application_id": loan_log.application_id}
         
     except Exception as e:
         if conn: conn.rollback()
@@ -227,7 +227,7 @@ def add_new_customer(user_details : AddNewCustomer):
     print('Adding a new customer and creating his account ')
 
     query = """INSERT INTO customers (name, phone, address, pre_approved_limit, credit_score, pin)
-    VALUES (%s,%s,%s,%s,%s,%s)"""
+    VALUES (%s,%s,%s,%s,%s,%s) RETURNING id """
 
     conn = None
     cursor = None
@@ -245,10 +245,11 @@ def add_new_customer(user_details : AddNewCustomer):
             user_details.pin
         ))
 
+        customer_id = cursor.fetchone()[0]
         conn.commit()
 
         print(f"Sucessfully created account for {user_details.customer_name}")
-        return {'status': 'Success'}
+        return {'status': 'Success', 'customer_id': customer_id}
     
     except Exception as e:
         if conn: conn.rollback()

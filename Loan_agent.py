@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import operator
 from typing import TypedDict, Annotated, List, Optional, Union
 from dotenv import load_dotenv
@@ -481,6 +482,7 @@ class Loan_agent_state(TypedDict):
     customer_id : Optional[int]
     credit_score : Optional[int]
     is_verified : bool
+    upload_failed_attempts: int
 
     is_existing : Optional[bool]
     awaiting_registration_details : bool
@@ -694,10 +696,12 @@ def SalesAgent(state: Loan_agent_state):
             print("---LOGIC: Detected loan query, routing to query handler---")
             return {"routing_decision": "goto_loan_query"}
     
+    from pathlib import Path
+
     # CHECK 4: Income proof needed - ask for upload
     if (state.get('needs_income_proof') == True) and \
-       (state.get('is_income_verified') == False) and \
-       (not isinstance(last_message_obj, HumanMessage)):
+    (state.get('is_income_verified') == False) and \
+    (not isinstance(last_message_obj, HumanMessage)):
         
         print("---LOGIC: Asking user to upload salary slip---")
         customer_name = state.get('customer_details', {}).get('name', 'there')
@@ -713,17 +717,62 @@ def SalesAgent(state: Loan_agent_state):
             'messages': [AIMessage(content=ask_for_upload_msg)],
             'routing_decision': 'waiting_for_user'
         }
-    
-    # CHECK 5: User typed 'uploaded'
+
+    # CHECK 5: User typed 'uploaded' - VALIDATE FILE EXISTS
     if (state.get('needs_income_proof') == True) and \
-       isinstance(last_message_obj, HumanMessage) and \
-       ("uploaded" in last_message.lower()):
+    isinstance(last_message_obj, HumanMessage) and \
+    ("uploaded" in last_message.lower()):
         
-        print("---LOGIC: User typed 'uploaded'. Handing off to income verifier.---")
-        return {
-            "routing_decision": "goto_income_verification"
-        }
-    
+        print("---LOGIC: User typed 'uploaded'. Checking for file---")
+        
+        customer_id = state.get('customer_id')
+        uploads_dir = Path('uploads')
+        expected_file = uploads_dir / f"{customer_id}_salary_slip.pdf"
+        
+        # ✅ CHECK: Does the file actually exist?
+        if expected_file.exists():
+            print(f"✅ File found: {expected_file}")
+            return {
+                "routing_decision": "goto_income_verification"
+            }
+        
+        else:
+            print(f"❌ File not found: {expected_file}")
+            
+            # Track failed attempts
+            failed_attempts = state.get('upload_failed_attempts', 0)
+            
+            # After 3 failed attempts, escalate
+            if failed_attempts >= 2:
+                print("❌ User exceeded maximum upload attempts")
+                
+                escalation_msg = (
+                    "I've tried to locate your salary slip multiple times without success.\n\n"
+                    "Let me connect you with a support agent who can help you upload it manually.\n\n"
+                    "**Support team will contact you shortly.**"
+                )
+                
+                return {
+                    'messages': [AIMessage(content=escalation_msg)],
+                    'routing_decision': 'end_conversation'
+                }
+            
+            else:
+                # File doesn't exist - ask again
+                error_msg = (
+                    f"❌ I couldn't find your salary slip file (Attempt {failed_attempts + 1}/3).\n\n"
+                    f"Please make sure to upload the file as **'{customer_id}_salary_slip.pdf'** "
+                    f"to the **'uploads'** folder.\n\n"
+                    "Make sure the filename is **exactly correct**, then type 'uploaded' again."
+                )
+                
+                return {
+                    'messages': [AIMessage(content=error_msg)],
+                    'upload_failed_attempts': failed_attempts + 1,
+                    'routing_decision': 'waiting_for_user'
+                }
+
+
     # CHECK 6: Loan options just presented
     if state.get('presented_options') and not state.get('selected_loan'):
         options_list = state['presented_options']
@@ -1011,20 +1060,68 @@ def sanction_node(state: Loan_agent_state) -> dict:
 
 
 def income_check_node(state: Loan_agent_state):
+    """
+    Checks if loan amount exceeds pre-approved limit.
+    If yes, routes to income verification; if no, proceeds to sanctioning.
+    """
+    print("---NODE: IncomeCheckNode---")
+    
     selected_loan_amount = state['selected_loan'].amount
     pre_approval_limit = state['customer_details']['pre_approved_limit']
-
-
+    
+    print(f"Loan: ₹{selected_loan_amount}, Pre-approval: ₹{pre_approval_limit}")
+    
     if not state.get('selected_loan') or not state.get('customer_details'):
+        print("❌ Missing loan or customer details")
         return {'routing_decision': 'goto_sales_agent'}
     
+    # Case 1: Loan within pre-approval limit - proceed directly to sanctioning
+    if selected_loan_amount <= pre_approval_limit:
+        print("---LOGIC: Loan within pre-approval limit. Proceeding to sanctioning---")
+        return {
+            'is_income_verified': True,
+            'needs_income_proof': False,
+            'routing_decision': 'goto_sanctioning'  # ✅ Direct to sanctioning
+        }
+    
+    # Case 2: Loan exceeds pre-approval but within 2x - need income proof
+    elif selected_loan_amount <= (2 * pre_approval_limit):
+        print("---LOGIC: Loan exceeds pre-approval. Asking for income proof---")
+        
+        customer_name = state.get('customer_details', {}).get('name', 'there')
+        customer_id = state.get('customer_id')
+        
+        ask_income_msg = (
+            f"Hi {customer_name}, the loan amount (₹{selected_loan_amount:,.0f}) exceeds your "
+            f"pre-approved limit (₹{pre_approval_limit:,.0f}).\n\n"
+            f"To proceed, I need to verify your income.\n\n"
+            f"Please upload your latest **salary slip** as '{customer_id}_salary_slip.pdf'.\n\n"
+            "Once uploaded, type **'uploaded'** to continue."
+        )
+        
+        return {
+            'messages': [AIMessage(content=ask_income_msg)],
+            'needs_income_proof': True,
+            'is_income_verified': False,
+            'routing_decision': 'waiting_for_user'  # ✅ Wait for upload, not back to sales_agent!
+        }
+    
+    # Case 3: Loan way too high - reject and ask to select again
     else:
-        if selected_loan_amount <= pre_approval_limit:
-            return {'is_income_verified': True, 'routing_decision': 'goto_sanctioning'}
-        elif selected_loan_amount > pre_approval_limit and selected_loan_amount <= (2 * pre_approval_limit):
-            return {'needs_income_proof': True, 'is_income_verified': False, 'routing_decision': 'goto_sales_agent'}
-        else:
-            return {"selected_loan": None, "routing_decision": "goto_sales_agent"}
+        print("---LOGIC: Loan exceeds maximum limit (2x pre-approval)---")
+        
+        max_loan = 2 * pre_approval_limit
+        reject_msg = (
+            f"Sorry, the requested loan amount (₹{selected_loan_amount:,.0f}) exceeds our maximum "
+            f"lending limit for you (₹{max_loan:,.0f}).\n\n"
+            f"Would you like to select a different loan amount?"
+        )
+        
+        return {
+            'messages': [AIMessage(content=reject_msg)],
+            'selected_loan': None,  # Clear selection
+            'routing_decision': 'waiting_for_user'  # ✅ Ask user to reselect, not automatic routing
+        }
 
 
 
@@ -1409,6 +1506,7 @@ workflow.add_conditional_edges(
     income_check_router,
     {
         "goto_sanctioning": "calculate_amortization", # Approved!
+        "waiting_for_user" : END,
         "goto_sales_agent": "sales_agent"        # Needs upload or is rejected
     }
 )
