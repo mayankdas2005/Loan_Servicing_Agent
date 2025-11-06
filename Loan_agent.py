@@ -54,7 +54,7 @@ customer_data_llm = llm.with_structured_output(AddNewCustomer)
 #Tools are here 
 CRM_API_URL = "http://localhost:8000/crm/verify"
 LOAN_API_URL = "http://localhost:8000/loans/options"
-LOG_API_URL = "http://localhost:8000/applications2/log"
+LOG_API_URL = "http://localhost:8000/applications/log"
 FETCH_APPLICATION_URL = "http://localhost:8000/applications2"
 ADD_CUSTOMER_URL = "http://localhost:8000/add_customer"
 UPLOAD_DIRECTORY = "./uploads/"
@@ -138,7 +138,7 @@ PDF_DIRECTORY = "./sanction_letters"
 
 @tool
 def generate_sanction_letter_tool(
-    application_id: int, 
+    application_id: str, 
     customer_name: str, 
     amount: int, 
     interest_rate: float, 
@@ -663,7 +663,7 @@ def SalesAgent(state: Loan_agent_state):
 
     
     # CHECK 2: Post-approval - sanction letter ready
-    if state.get('sanction_letter_path') and not isinstance(last_message_obj, AIMessage):
+    if state.get('sanction_letter_path') and not isinstance(last_message_obj, AIMessage) and not state.get('loan_approved'):
         print("---LOGIC: Presenting final sanction letter---")
         
         customer_name = state.get('customer_details', {}).get('name', 'Customer')
@@ -682,6 +682,7 @@ def SalesAgent(state: Loan_agent_state):
         
         return {
             'messages': [AIMessage(content=final_message)],
+            'loan_approved': True,
             'routing_decision': 'waiting_for_user'  # Continue conversation
         }
     
@@ -695,8 +696,7 @@ def SalesAgent(state: Loan_agent_state):
         if any(keyword in last_message.lower() for keyword in query_keywords):
             print("---LOGIC: Detected loan query, routing to query handler---")
             return {"routing_decision": "goto_loan_query"}
-    
-    from pathlib import Path
+
 
     # CHECK 4: Income proof needed - ask for upload
     if (state.get('needs_income_proof') == True) and \

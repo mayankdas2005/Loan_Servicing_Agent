@@ -179,7 +179,7 @@ def fetch_application(application_id: str):
 
 
 
-@app.post("/applications2/log")
+@app.post("/applications/log")
 def log_application(loan_log: LoanApplicationLog):
     """
     Logs a finalized loan application into the 'applications' table.
@@ -188,7 +188,7 @@ def log_application(loan_log: LoanApplicationLog):
     
     query = """
     INSERT INTO applications2 (application_id, customer_id, plan_name, amount, interest_rate, tenure_years)
-    VALUES (%s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s)
     """
     
     conn = None
@@ -203,10 +203,9 @@ def log_application(loan_log: LoanApplicationLog):
             loan_log.plan_name,
             loan_log.amount,
             loan_log.interest_rate,
-            loan_log.tenure_years
+            loan_log.tenure_years,
         ))
         
-        # Get the new application_id that the database generated
         conn.commit()
         
         print(f"Successfully logged new application with ID: {loan_log.application_id}")
@@ -214,7 +213,7 @@ def log_application(loan_log: LoanApplicationLog):
         
     except Exception as e:
         if conn: conn.rollback()
-        print(f"Database error in /applications2/log: {e}")
+        print(f"Database error in /applications/log: {e}")
         raise HTTPException(status_code=500, detail="Database internal error")
     finally:
         if cursor: cursor.close()
