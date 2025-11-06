@@ -2,7 +2,8 @@
 ---
 
 ```markdown
-# 🏦 Tata Capital Loan Servicing Agent
+
+### 🏦 Tata Capital Loan Servicing Agent
 
 > **An AI-powered financial assistant** that helps customers apply for, verify, and manage personal loans — built with **FastAPI**, **Streamlit**, and **LangGraph**, and powered by **Google’s Gemini API** for natural language intelligence.
 
@@ -224,7 +225,7 @@ If you’d like to improve the agent logic, database models, or add new LLM feat
 ## 🧑‍💻 Maintainers
 
 **Developed by:**
-📍 *Mayank Das NIT Trichy*
+📍 *Mayank Das*
 *
 ---
 
